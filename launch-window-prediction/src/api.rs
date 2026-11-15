@@ -202,6 +202,8 @@ pub struct Request {
     pub launch_date: Option<String>,
     /// Сутки прилёта (UTC), "ГГГГ-ММ-ДД". С точкой посадки — сутки посадки в неё.
     pub arrival_date: Option<String>,
+    /// Тип траектории: "direct" (по умолчанию) или "hohmann".
+    pub trajectory: Option<String>,
     /// Космодром (id из каталога). Без него — все космодромы (или космодромы ракеты).
     pub spaceport: Option<String>,
     /// Ракета-носитель (id из каталога).
@@ -274,6 +276,9 @@ impl Request {
         }
         if let Some(d) = &self.arrival_date {
             push("--arrival-date", d.clone());
+        }
+        if let Some(k) = &self.trajectory {
+            push("--trajectory", k.clone());
         }
         if let Some(p) = &self.spaceport {
             push("--spaceport", p.clone());
@@ -754,6 +759,7 @@ fn help() -> Value {
         },
         "request_fields": {
             "launch_date | arrival_date": "UTC day YYYY-MM-DD (one of them); with landing_site, arrival_date is the landing day",
+            "trajectory": "transfer trajectory: \"direct\" (default; Lambert arc at any angle) or \"hohmann\" (tangential burn at perigee, apogee at the Moon, 180 deg)",
             "spaceport": "spaceport id (see catalog); omit to search all",
             "rocket, rocket_overrides": "rocket id and {field: value} overrides",
             "spacecraft, spacecraft_overrides": "spacecraft id and {field: value} overrides",

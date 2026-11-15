@@ -20,8 +20,8 @@ use launch_window_prediction::spacecraft::{ResolvedSpacecraft, Severity, Spacecr
 use launch_window_prediction::spaceport::{Spaceport, SpaceportCatalog};
 use launch_window_prediction::terrain::TerrainSet;
 use launch_window_prediction::trajectory::{
-    DateConstraint, DeltaVBudget, DirectTransfer, Maneuver, RefineAttempt, ScanPoint, Trajectory, TransferConfig,
-    TransferReport, TransferSolution,
+    DateConstraint, DeltaVBudget, Maneuver, RefineAttempt, ScanPoint, TrajectoryKind, TransferConfig, TransferReport,
+    TransferSolution,
 };
 use launch_window_prediction::visibility::{
     SiteVisibility, VisibilityConfig, VisibilitySample, VisibilitySummary,
@@ -97,6 +97,11 @@ struct Cli {
     /// Файл с параметрами перелёта.
     #[arg(long)]
     transfer_config: Option<PathBuf>,
+
+    /// Тип траектории перелёта: direct (прямой перелёт, задача Ламберта) или hohmann
+    /// (перелёт Гомана: разгон по касательной, апогей у Луны, 180°).
+    #[arg(long, default_value = "direct", value_name = "direct|hohmann")]
+    trajectory: TrajectoryKind,
 
     /// Начало расчёта видимости, например "2026-11-14T12:00:00 UTC".
     /// По умолчанию — момент прилёта найденного перелёта.
@@ -707,7 +712,7 @@ async fn solve_transfers(
     let mut cfg = cfg;
     if let Some((r, cap)) = rocket {
         // Параметры ракеты заменяют допущения из transfer.toml.
-        let dt = &mut cfg.direct_transfer;
+        let dt = &mut cfg.transfer;
         dt.max_tli_delta_v_km_s = cap.max_tli_delta_v_m_s / 1000.0;
         anyhow::ensure!(
             dt.max_tli_delta_v_km_s >= 3.0,
@@ -744,7 +749,7 @@ async fn solve_transfers(
     // торможение у Луны (типично ~850 м/с), если этот манёвр его.
     if let Some(b) = budget.as_mut() {
         if cfg.mission.descent_delta_v_m_s.is_none() {
-            let r_llo = MOON_RADIUS_KM + cfg.direct_transfer.lunar_orbit_altitude_km;
+            let r_llo = MOON_RADIUS_KM + cfg.transfer.lunar_orbit_altitude_km;
             let site_radius = landing_site.map_or(MOON_RADIUS_KM, |s| s.site.position_km().norm());
             let prior = if b.maneuvers.contains(&Maneuver::Loi) { 850.0 } else { 0.0 };
             match descent.plan(4902.8, r_llo, prior, site_radius)? {
@@ -792,9 +797,16 @@ async fn solve_transfers(
         }
     }
     log.event("ascent_setup", &ascent);
-    let trajectory = DirectTransfer::new(cfg.direct_transfer)?
-        .with_ascent(ascent.clone())
-        .with_ascent_cache_dir((!cli.no_cache).then(|| cli.cache_dir.clone()));
+    log.event(
+        "trajectory_type",
+        json!({ "trajectory": cli.trajectory, "name": cli.trajectory.report_name(), "model": cli.trajectory.description() }),
+    );
+    let trajectory = launch_window_prediction::trajectory::build(
+        cli.trajectory,
+        &cfg,
+        ascent.clone(),
+        (!cli.no_cache).then(|| cli.cache_dir.clone()),
+    )?;
     let numerical = cfg.numerical.clone();
     // Двигатель разгона к Луне: аппарат, если разгон — его манёвр, иначе разгонная ступень
     // ракеты космодрома (с остатком топлива после подъёма). Без данных — мгновенный импульс.
@@ -1027,11 +1039,20 @@ fn ranking_key(r: &TransferReport, fastest: bool) -> f64 {
     })
 }
 
+/// Тип траектории для заголовков вывода.
+fn trajectory_label(reports: &[TransferReport]) -> &'static str {
+    match reports.first().and_then(|r| r.trajectory.parse::<TrajectoryKind>().ok()).unwrap_or_default() {
+        TrajectoryKind::Direct => "direct transfer",
+        TrajectoryKind::Hohmann => "Hohmann transfer",
+    }
+}
+
 fn print_transfers(reports: &[TransferReport], constraint: DateConstraint) {
     match constraint {
-        DateConstraint::LaunchDay(d) => println!("== Transfer: best launch on {d} (UTC day)"),
+        DateConstraint::LaunchDay(d) => println!("== Transfer ({}): best launch on {d} (UTC day)", trajectory_label(reports)),
         DateConstraint::ArrivalDay(d) => println!(
-            "== Transfer: best {} on {d} (UTC day)",
+            "== Transfer ({}): best {} on {d} (UTC day)",
+            trajectory_label(reports),
             if reports.iter().any(|r| r.landing_site.is_some()) { "landing at the site" } else { "arrival" }
         ),
     }
@@ -1079,6 +1100,22 @@ fn print_transfers(reports: &[TransferReport], constraint: DateConstraint) {
             s.departure.delta_v_magnitude_km_s,
             s.arrival.delta_v_loi_km_s,
         );
+        if let Some(h) = &s.hohmann {
+            println!(
+                "  Hohmann: half-ellipse {:.0} x {:.0} km (a = {:.0} km), tangential TLI to {:.4} km/s, apogee speed {:.4} km/s; \
+                 nominal flight time {:.2} h, timing off by {:.1} s (tolerance {:.0} s), apogee {:+.1} km from the Moon's centre distance {:.0} km.",
+                h.perigee_radius_km,
+                h.apogee_radius_km,
+                h.semi_major_axis_km,
+                h.perigee_speed_km_s,
+                h.apogee_speed_km_s,
+                h.nominal_time_of_flight_s / 3600.0,
+                h.timing_error_s,
+                h.timing_tolerance_s,
+                h.apogee_miss_km,
+                h.moon_distance_km,
+            );
+        }
         let a = &s.ascent;
         match &a.simulation {
             Some(sim) => {
@@ -1318,7 +1355,8 @@ fn print_transfers(reports: &[TransferReport], constraint: DateConstraint) {
         "Δv in km/s from the parking orbit (tli) and into lunar orbit (loi); rot = speed gained from \
          Earth's rotation at launch (reference only, not part of Δv)."
     );
-    println!("Model: direct transfer, patched conic (Earth gravity only on the way, Moon ephemeris DE440).");
+    let kind = reports.first().and_then(|r| r.trajectory.parse::<TrajectoryKind>().ok()).unwrap_or_default();
+    println!("Model: {}.", kind.description());
 }
 
 fn print_visibility(

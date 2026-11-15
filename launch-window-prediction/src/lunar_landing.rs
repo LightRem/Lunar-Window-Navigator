@@ -502,7 +502,93 @@ pub(crate) fn rotate_about(v: Vector3, k: Vector3, a: f64) -> Vector3 {
 /// (относительно Луны, J2000). `window` — допустимый интервал момента касания (например,
 /// заданные сутки). `mu_moon` — км³/с², `r_orbit_km` — радиус окололунной орбиты,
 /// `prior_delta_v_m_s` — Δv, израсходованный аппаратом до спуска.
+#[allow(clippy::too_many_arguments)]
 pub fn find_landing(
+    almanac: &Almanac,
+    target: &LandingTarget,
+    t_arrival: Epoch,
+    v_inf: Vector3,
+    mu_moon: f64,
+    r_orbit_km: f64,
+    prior_delta_v_m_s: f64,
+    window: Option<(Epoch, Epoch)>,
+) -> Result<std::result::Result<LandingInfo, &'static str>> {
+    let mut passes = LandingPasses::default();
+    find_landing_in(&mut passes, almanac, target, t_arrival, v_inf, mu_moon, r_orbit_km, prior_delta_v_m_s, window)
+}
+
+/// Витки, уже посчитанные для одного прилёта (момент, скорость подлёта, орбита, израсходованный
+/// Δv): план спуска, геометрия каждого витка и видимость в момент касания от суток не зависят.
+/// Экономный режим просматривает один и тот же прилёт для нескольких соседних суток — с
+/// [`LandingCache`] витки считаются один раз, а для каждых суток применяется только их окно.
+#[derive(Debug, Default)]
+pub struct LandingPasses {
+    plan: Option<std::result::Result<DescentPlan, &'static str>>,
+    pole: Option<Vector3>,
+    /// Геометрия витков по порядку; `None` — на этом витке ожидание уже больше лимита (дальше не считается).
+    geo: Vec<Option<PassGeo>>,
+    /// Видимость в момент касания на витке: (Солнце, Земля), посчитанная по мере надобности.
+    vis: Vec<Option<(BodyVisibility, BodyVisibility)>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PassGeo {
+    t: Epoch,
+    h: Vector3,
+    theta_site: f64,
+    d_node: f64,
+    t_doi: Epoch,
+    wait_s: f64,
+}
+
+/// Общий кэш [`LandingPasses`] по прилётам (ключ — точные значения входных данных).
+#[derive(Debug, Default)]
+pub struct LandingCache {
+    entries: std::sync::Mutex<std::collections::HashMap<[u64; 7], std::sync::Arc<std::sync::Mutex<LandingPasses>>>>,
+}
+
+impl LandingCache {
+    /// [`find_landing`] с запоминанием витков этого прилёта.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find(
+        &self,
+        almanac: &Almanac,
+        target: &LandingTarget,
+        t_arrival: Epoch,
+        v_inf: Vector3,
+        mu_moon: f64,
+        r_orbit_km: f64,
+        prior_delta_v_m_s: f64,
+        window: Option<(Epoch, Epoch)>,
+    ) -> Result<std::result::Result<LandingInfo, &'static str>> {
+        let key = [
+            t_arrival.to_tai_duration().total_nanoseconds() as u64,
+            v_inf.x.to_bits(),
+            v_inf.y.to_bits(),
+            v_inf.z.to_bits(),
+            mu_moon.to_bits(),
+            r_orbit_km.to_bits(),
+            prior_delta_v_m_s.to_bits(),
+        ];
+        let entry = self.entries.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_default().clone();
+        // Без ожидания: если витки этого прилёта сейчас считает другой поток (или этот же, выше по
+        // стеку, — rayon может подсунуть задачу ждущему потоку), считаем без кэша. Ждать здесь
+        // нельзя — это может стать взаимной блокировкой.
+        let mut passes = match entry.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let mut fresh = LandingPasses::default();
+                return find_landing_in(&mut fresh, almanac, target, t_arrival, v_inf, mu_moon, r_orbit_km, prior_delta_v_m_s, window);
+            }
+        };
+        find_landing_in(&mut passes, almanac, target, t_arrival, v_inf, mu_moon, r_orbit_km, prior_delta_v_m_s, window)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_landing_in(
+    memo: &mut LandingPasses,
     almanac: &Almanac,
     target: &LandingTarget,
     t_arrival: Epoch,
@@ -523,7 +609,15 @@ pub fn find_landing(
     let dc = &target.descent.config;
     let max_wait_s = w.max_wait_in_orbit_h * 3600.0;
     let min_wait_s = dc.min_time_in_orbit_h * 3600.0;
-    let plan = match target.descent.plan(mu_moon, r_orbit_km, prior_delta_v_m_s, target.site.site.position_km().norm())? {
+    let plan = match memo.plan {
+        Some(p) => p,
+        None => {
+            let p = target.descent.plan(mu_moon, r_orbit_km, prior_delta_v_m_s, target.site.site.position_km().norm())?;
+            memo.plan = Some(p);
+            p
+        }
+    };
+    let plan = match plan {
         Ok(p) => p,
         Err(reason) => return Ok(Err(reason)),
     };
@@ -536,23 +630,21 @@ pub fn find_landing(
             .rotate(MOON_ME_DE440_ME421_FRAME, MOON_J2000, t)
             .map_err(|e| Error::Almanac(format!("Moon orientation at {t}: {e}")))
     };
-    let pole = moon_dcm(t_arrival)? * Vector3::new(0.0, 0.0, 1.0);
+    let pole = match memo.pole {
+        Some(p) => p,
+        None => {
+            let p = moon_dcm(t_arrival)? * Vector3::new(0.0, 0.0, 1.0);
+            memo.pole = Some(p);
+            p
+        }
+    };
 
-    struct Geo {
-        h: Vector3,
-        theta_site: f64,
-        d_node: f64,
-        t_doi: Epoch,
-    }
-
-    let (mut sun_fail, mut earth_fail, mut any_pass) = (0u32, 0u32, false);
-    let max_passes = ((max_wait_s - min_wait_s).max(0.0) / period_s).ceil() as u32 + 1;
-    for k in 0..=max_passes {
-        // Момент касания уточняется итерациями: точка поворачивается вместе с Луной,
-        // а плоскость орбиты — из-за J2 (скорость поворота зависит от наклонения).
+    // Геометрия витка `k` (момент касания уточняется итерациями: точка поворачивается вместе с
+    // Луной, а плоскость орбиты — из-за J2; скорость поворота зависит от наклонения).
+    let pass_geo = |k: u32| -> Result<PassGeo> {
         let mut t = t_arrival + (min_wait_s + k as f64 * period_s + descent_s) * Unit::Second;
         let mut cos_i = 0.0;
-        let mut geo: Option<Geo> = None;
+        let mut geo: Option<PassGeo> = None;
         for _ in 0..12 {
             let s = moon_dcm(t)? * site_fixed;
             let dt = (t - t_arrival).to_seconds();
@@ -591,16 +683,30 @@ pub fn find_landing(
             let t_new = t_doi + descent_s * Unit::Second;
             let converged = (t_new - t).to_seconds().abs() < 0.5;
             t = t_new;
-            geo = Some(Geo { h, theta_site, d_node, t_doi });
+            geo = Some(PassGeo { t, h, theta_site, d_node, t_doi, wait_s: (t_doi - t_arrival).to_seconds() });
             if converged {
                 break;
             }
         }
-        let g = geo.expect("at least one iteration");
-        let wait_s = (g.t_doi - t_arrival).to_seconds();
-        if wait_s > max_wait_s {
-            break;
+        Ok(geo.expect("at least one iteration"))
+    };
+
+    let (mut sun_fail, mut earth_fail, mut any_pass) = (0u32, 0u32, false);
+    let max_passes = ((max_wait_s - min_wait_s).max(0.0) / period_s).ceil() as u32 + 1;
+    for k in 0..=max_passes {
+        let ki = k as usize;
+        if memo.geo.len() <= ki {
+            // Витки считаются по порядку; после витка сверх лимита ожидания — не считаются.
+            if memo.geo.last().is_some_and(|g| g.is_none()) {
+                break;
+            }
+            let g = pass_geo(k)?;
+            memo.geo.push((g.wait_s <= max_wait_s).then_some(g));
+            memo.vis.push(None);
         }
+        // Ожидание до схода с орбиты больше лимита: дальше витки ещё позже.
+        let Some(g) = memo.geo[ki] else { break };
+        let t = g.t;
         if let Some((lo, hi)) = window {
             if t < lo {
                 continue;
@@ -611,20 +717,25 @@ pub fn find_landing(
         }
         any_pass = true;
 
-        let sky = sky_at(almanac, &target.site.site, t)?;
-        let vis = target.site.evaluate(&sky);
+        let (sun, earth) = match memo.vis[ki] {
+            Some(v) => v,
+            None => {
+                let sky = sky_at(almanac, &target.site.site, t)?;
+                let vis = target.site.evaluate(&sky);
+                memo.vis[ki] = Some((vis.sun, vis.earth));
+                (vis.sun, vis.earth)
+            }
+        };
         // Пределы высоты Солнца действуют только когда Солнце требуется (без него - посадка в любое время).
         let sun_ok = !w.require_sun_visible
-            || (vis.sun.visible
-                && vis.sun.elevation_deg >= w.sun_elevation_min_deg
-                && vis.sun.elevation_deg <= w.sun_elevation_max_deg);
-        let earth_ok = !w.require_earth_visible || vis.earth.visible;
+            || (sun.visible && sun.elevation_deg >= w.sun_elevation_min_deg && sun.elevation_deg <= w.sun_elevation_max_deg);
+        let earth_ok = !w.require_earth_visible || earth.visible;
         if sun_ok && earth_ok {
             return Ok(Ok(LandingInfo {
                 epoch: t,
                 doi_epoch: g.t_doi,
                 pdi_epoch: g.t_doi + plan.coast_s * Unit::Second,
-                wait_after_arrival_s: wait_s,
+                wait_after_arrival_s: g.wait_s,
                 orbit_pass: k,
                 lunar_orbit_period_s: period_s,
                 lunar_orbit_inclination_deg: g.h.dot(&pole).clamp(-1.0, 1.0).acos().to_degrees(),
@@ -634,8 +745,8 @@ pub fn find_landing(
                 angle_periselene_to_site_deg: g.theta_site.to_degrees(),
                 approach_eccentricity: ecc,
                 descent: plan,
-                sun: vis.sun,
-                earth: vis.earth,
+                sun,
+                earth,
             }));
         }
         sun_fail += u32::from(!sun_ok);
@@ -738,6 +849,26 @@ mod tests {
     fn flat_target(lat: f64, lon: f64, window: LandingWindowConfig) -> LandingTarget {
         let site = SiteVisibility::new(None, lat, lon, 0.0, VisibilityConfig::default()).unwrap();
         LandingTarget { site, window, descent: DescentModel::default() }
+    }
+
+    #[test]
+    #[ignore = "needs kernels in data/kernels"]
+    fn real_landing_cache_gives_the_same_answers_for_every_day() {
+        let almanac = real_almanac();
+        let t_a = Epoch::from_gregorian_utc_hms(2026, 12, 3, 19, 42, 0);
+        let v_inf = Vector3::new(0.3, -1.1, 0.5);
+        let target = flat_target(10.0, 30.0, LandingWindowConfig { max_wait_in_orbit_h: 72.0, ..Default::default() });
+        let cache = LandingCache::default();
+        let day0 = Epoch::from_gregorian_utc_at_midnight(2026, 12, 3);
+        // Сутки в разном порядке (кэш заполняется не по порядку) и без окна.
+        let mut windows: Vec<Option<(Epoch, Epoch)>> =
+            [3, 0, 1, 4, 2, 5].iter().map(|&d| Some((day0 + d * Unit::Day, day0 + (d + 1) * Unit::Day))).collect();
+        windows.push(None);
+        for w in windows {
+            let plain = find_landing(&almanac, &target, t_a, v_inf, 4902.8, 1837.4, 900.0, w).unwrap();
+            let cached = cache.find(&almanac, &target, t_a, v_inf, 4902.8, 1837.4, 900.0, w).unwrap();
+            assert_eq!(plain, cached, "{w:?}");
+        }
     }
 
     #[test]

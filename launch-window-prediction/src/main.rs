@@ -21,7 +21,7 @@ use launch_window_prediction::spacecraft::{ResolvedSpacecraft, Severity, Spacecr
 use launch_window_prediction::spaceport::{Spaceport, SpaceportCatalog};
 use launch_window_prediction::terrain::TerrainSet;
 use launch_window_prediction::trajectory::{
-    DateConstraint, DeltaVBudget, Maneuver, RefineAttempt, ScanPoint, TrajectoryKind, TransferConfig, TransferReport,
+    DateConstraint, DeltaVBudget, EconomyDays, FlightMode, Maneuver, RefineAttempt, ScanPoint, TrajectoryKind, TransferConfig, TransferReport,
     TransferSolution,
 };
 use launch_window_prediction::visibility::{
@@ -117,6 +117,23 @@ struct Cli {
     /// (перелёт Гомана: разгон по касательной, апогей у Луны, 180°).
     #[arg(long, default_value = "direct", value_name = "direct|hohmann")]
     trajectory: TrajectoryKind,
+
+    /// Режим полёта: fast (быстрый, как раньше: лучший вариант в заданные сутки) или economy
+    /// (экономный: наименьший суммарный Δv миссии, поиск в пределах ±N суток от даты,
+    /// параметры — секция [economy] в transfer.toml).
+    #[arg(long, default_value = "fast", value_name = "fast|economy")]
+    mode: FlightMode,
+
+    /// Рассчитать окно старта вместо поиска одного варианта (быстрого или экономного).
+    /// Только с --arrival-date (сутки посадки, без точки посадки — сутки прилёта к Луне): все
+    /// моменты старта, при которых Δv миссии не больше наименьшего на запас
+    /// ([launch_window] в transfer.toml).
+    #[arg(long, requires = "arrival_date", conflicts_with_all = ["launch_date", "mode"])]
+    launch_window: bool,
+
+    /// Запас окна старта над наименьшим Δv миссии, м/с (заменяет [launch_window] margin_m_s).
+    #[arg(long, value_name = "M_S", requires = "launch_window")]
+    window_margin: Option<f64>,
 
     /// Начало расчёта видимости, например "2026-11-14T12:00:00 UTC".
     /// По умолчанию — момент прилёта найденного перелёта.
@@ -422,6 +439,9 @@ async fn run(cli: &Cli, log: Arc<RunLog>) -> anyhow::Result<&'static str> {
         json!({
             "spaceport": cli.spaceport,
             "date_constraint": date,
+            "mode": cli.mode,
+            "launch_window": cli.launch_window,
+            "window_margin_m_s": cli.window_margin,
             "landing_site": site.map(|(lat, lon)| json!({ "lat_deg": lat, "lon_deg": lon })),
             "terrain_dir": cli.terrain_dir,
             "kernels_dir": cli.kernels_dir,
@@ -774,7 +794,21 @@ async fn solve_transfers(
         None => TransferConfig::default(),
     };
     log.event("config_transfer", json!({ "path": path, "built_in_defaults": path.is_none(), "config": cfg }));
+    let mode = if cli.launch_window { FlightMode::LaunchWindow } else { cli.mode };
     let mut cfg = cfg;
+    if let Some(m) = cli.window_margin {
+        cfg.launch_window.margin_m_s = m;
+    }
+    let mut cfg = cfg.for_mode(mode)?;
+    log.event(
+        "flight_mode",
+        json!({
+            "mode": mode,
+            "description": mode.description(),
+            "economy": (mode == FlightMode::Economy).then_some(&cfg.economy),
+            "launch_window": (mode == FlightMode::LaunchWindow).then_some(&cfg.launch_window),
+        }),
+    );
     if let Some(t) = &cli.launch_from_utc {
         cfg.transfer.launch_from_utc_h = parse_hhmm(t)?;
     }
@@ -876,10 +910,25 @@ async fn solve_transfers(
     let trajectory = launch_window_prediction::trajectory::build(
         cli.trajectory,
         &cfg,
+        mode,
         ascent.clone(),
         (!cli.no_cache).then(|| cli.cache_dir.clone()),
     )?;
-    let numerical = cfg.numerical.clone();
+    let mut numerical = cfg.numerical.clone();
+    if mode == FlightMode::LaunchWindow && !cfg.launch_window.refine {
+        // Окно считается по формулам; численное уточнение лучшего старта — секунды на вариант
+        // и на края окна не влияет. Включается `[launch_window] refine = true`.
+        numerical.enabled = false;
+    }
+    // Экономный режим: заданные сутки и соседние в пределах ±date_shift_days.
+    let shifts: Vec<i32> = match mode {
+        FlightMode::Fast | FlightMode::LaunchWindow => vec![0],
+        FlightMode::Economy => {
+            let n = cfg.economy.date_shift_days as i32;
+            (-n..=n).collect()
+        }
+    };
+    let (date_shift_days, min_saving_m_s) = (cfg.economy.date_shift_days, cfg.economy.min_saving_m_s);
     // Двигатель разгона к Луне: аппарат, если разгон — его манёвр, иначе разгонная ступень
     // ракеты космодрома (с остатком топлива после подъёма). Без данных — мгновенный импульс.
     let sc_engine = spacecraft.map(|sc| {
@@ -910,10 +959,29 @@ async fn solve_transfers(
     let mut reports = tokio::task::spawn_blocking(move || {
         use rayon::prelude::*;
         // Космодромы считаются параллельно (внутри каждого перебор тоже параллельный).
-        let mut reports = ports
-            .par_iter()
-            .map(|p| trajectory.solve(&almanac, p, constraint, budget.as_ref(), target.as_ref()))
-            .collect::<launch_window_prediction::Result<Vec<_>>>()?;
+        let mut reports = if mode == FlightMode::Economy {
+            // Каждые сутки для каждого космодрома (параллельно); для космодрома выбираются сутки
+            // с наименьшим суммарным Δv миссии.
+            let jobs: Vec<(usize, i32)> = (0..ports.len()).flat_map(|i| shifts.iter().map(move |&k| (i, k))).collect();
+            let solved = jobs
+                .par_iter()
+                .map(|&(i, k)| {
+                    trajectory
+                        .solve(&almanac, &ports[i], constraint.shifted(k), budget.as_ref(), target.as_ref())
+                        .map(|r| (i, k, r))
+                })
+                .collect::<launch_window_prediction::Result<Vec<_>>>()?;
+            let mut by_port: Vec<Vec<(i32, TransferReport)>> = vec![Vec::new(); ports.len()];
+            for (i, k, r) in solved {
+                by_port[i].push((k, r));
+            }
+            by_port.into_iter().filter_map(|days| EconomyDays::pick(constraint, date_shift_days, min_saving_m_s, days)).collect()
+        } else {
+            ports
+                .par_iter()
+                .map(|p| trajectory.solve(&almanac, p, constraint, budget.as_ref(), target.as_ref()))
+                .collect::<launch_window_prediction::Result<Vec<_>>>()?
+        };
         if numerical.enabled {
             let fastest_goal =
                 budget.as_ref().is_some_and(|b| b.objective == launch_window_prediction::trajectory::Objective::Fastest);
@@ -932,7 +1000,7 @@ async fn solve_transfers(
                 }
             };
             // Подходит ли уточнённое решение: условия посадки выполнены и касание в заданные сутки.
-            let verdict = |s: &TransferSolution| -> Option<String> {
+            let verdict = |s: &TransferSolution, constraint: DateConstraint| -> Option<String> {
                 let Some(n) = &s.refined else {
                     return Some(s.refine_failure.clone().unwrap_or_else(|| "not refined".into()));
                 };
@@ -960,27 +1028,16 @@ async fn solve_transfers(
                 None
             };
             let refine_one = |r: &mut TransferReport| -> launch_window_prediction::Result<bool> {
+                // Сутки этого отчёта (в экономном режиме — выбранные, а не заданные).
+                let constraint = r.constraint;
                 let Some(s) = r.solution.as_mut() else { return Ok(false) };
-                let ok = refine_solution(s)?;
-                let Some(why) = verdict(s) else { return Ok(ok) };
-                if target.is_none() {
-                    return Ok(ok);
-                }
-                // Уточнение отвергло вариант (обычно медленный перелёт: Луна притягивает аппарат
-                // раньше, чем считают формулы, и прилёт смещается). Проверяем другие моменты
-                // прилёта из перебора — по тому же порядку, что и выбор лучшего.
-                let mut attempts = vec![RefineAttempt {
-                    arrival: s.arrival.epoch,
-                    launch: Some(s.launch.epoch),
-                    accepted: false,
-                    reason: Some(why),
-                }];
-                let mut tried = vec![s.arrival.epoch];
+                // Если уточнение отвергнет вариант (обычно медленный перелёт: Луна притягивает
+                // аппарат раньше, чем считают формулы, и прилёт смещается), проверяются другие
+                // моменты прилёта из перебора — по тому же порядку, что и выбор лучшего.
                 // Насколько уточнение сдвигает прилёт (у соседних вариантов примерно так же) и
                 // сколько длится спуск от схода с орбиты до касания: по ним прогнозируется
                 // ожидание на орбите у каждого варианта, и заведомо не влезающие в лимит пропускаются.
                 let shift_of = |s: &TransferSolution| s.refined.as_ref().map(|n| (n.arrival_epoch - s.arrival.epoch).to_seconds());
-                let mut shift_s = shift_of(s);
                 let descent_s = s.landing.map_or(0.0, |l| (l.epoch - l.doi_epoch).to_seconds());
                 let max_wait_s = target.as_ref().map_or(f64::MAX, |t| t.window.max_wait_in_orbit_h * 3600.0);
                 let cands: Vec<ScanPoint> =
@@ -989,24 +1046,93 @@ async fn solve_transfers(
                     if fastest_goal { p.time_of_flight_h.unwrap_or(f64::MAX) } else { p.delta_v_total_km_s.unwrap_or(f64::MAX) }
                 };
                 let spacing = 30 * Unit::Minute;
-                while attempts.len() <= MAX_REFINE_ATTEMPTS {
-                    let fits = |p: &ScanPoint, shift: Option<f64>| match (shift, p.landing) {
+                // Следующий вариант: самый выгодный из ещё не проверенных (не ближе 30 мин к
+                // проверенным), сначала среди влезающих в лимит ожидания.
+                let pick_next = |tried: &[Epoch], shift: Option<f64>| -> Option<ScanPoint> {
+                    let fits = |p: &ScanPoint| match (shift, p.landing) {
                         // Запас 1 ч на разброс сдвига между вариантами.
                         (Some(sh), Some(l)) => (l - p.arrival).to_seconds() - descent_s - sh <= max_wait_s - 3600.0,
                         _ => true,
                     };
                     let fresh = |p: &&ScanPoint| !tried.iter().any(|t| (p.arrival - *t).abs() < spacing);
-                    let pick = cands
+                    cands
                         .iter()
                         .filter(fresh)
-                        .filter(|p| fits(p, shift_s))
+                        .filter(|p| fits(p))
                         .min_by(|a, b| key(a).total_cmp(&key(b)))
-                        .or_else(|| cands.iter().filter(fresh).min_by(|a, b| key(a).total_cmp(&key(b))));
-                    let Some(p) = pick.cloned() else { break };
+                        .or_else(|| cands.iter().filter(fresh).min_by(|a, b| key(a).total_cmp(&key(b))))
+                        .cloned()
+                };
+                let spaceport = r.spaceport.clone();
+                // Другой момент прилёта: вариант и его уточнение (`None` — вариантов нет).
+                let try_arrival = |arrival: Epoch| -> launch_window_prediction::Result<Option<TransferSolution>> {
+                    let alt = trajectory.solve_at(&almanac, &spaceport, constraint, budget.as_ref(), target.as_ref(), arrival)?;
+                    Ok(match alt {
+                        Some(mut alt) => {
+                            refine_solution(&mut alt)?;
+                            Some(alt)
+                        }
+                        None => None,
+                    })
+                };
+                // Уточнение — секунды на вариант в одном потоке. Поэтому следующие варианты
+                // уточняются заранее, параллельно (в предположении, что сдвиг прилёта не изменится,
+                // а пока лучший уточняется — без учёта сдвига); результаты принимаются строго по
+                // очереди, как в последовательном переборе: если следующим был бы выбран другой
+                // вариант, заготовка не используется. Итог тот же, что и без заготовок.
+                let threads = rayon::current_num_threads().max(1);
+                let speculate = |tried: &[Epoch], shift: Option<f64>, width: usize| -> Vec<Epoch> {
+                    let mut tried = tried.to_vec();
+                    let mut out = Vec::new();
+                    while out.len() < width {
+                        let Some(p) = pick_next(&tried, shift) else { break };
+                        tried.push(p.arrival);
+                        out.push(p.arrival);
+                    }
+                    out
+                };
+                let mut ready: Vec<(Epoch, launch_window_prediction::Result<Option<TransferSolution>>)> = Vec::new();
+                let first_round = if target.is_some() && threads > 1 {
+                    speculate(&[s.arrival.epoch], None, (threads - 1).min(MAX_REFINE_ATTEMPTS))
+                } else {
+                    Vec::new()
+                };
+                let (ok, early) = rayon::join(
+                    || refine_solution(s),
+                    || first_round.par_iter().map(|&t| (t, try_arrival(t))).collect::<Vec<_>>(),
+                );
+                let ok = ok?;
+                ready.extend(early);
+                let Some(why) = verdict(s, constraint) else { return Ok(ok) };
+                if target.is_none() {
+                    return Ok(ok);
+                }
+                let mut attempts = vec![RefineAttempt {
+                    arrival: s.arrival.epoch,
+                    launch: Some(s.launch.epoch),
+                    accepted: false,
+                    reason: Some(why),
+                }];
+                let mut tried = vec![s.arrival.epoch];
+                let mut shift_s = shift_of(s);
+                while attempts.len() <= MAX_REFINE_ATTEMPTS {
+                    let Some(p) = pick_next(&tried, shift_s) else { break };
                     tried.push(p.arrival);
-                    let Some(mut alt) =
-                        trajectory.solve_at(&almanac, &r.spaceport, constraint, budget.as_ref(), target.as_ref(), p.arrival)?
-                    else {
+                    let res = match ready.iter().position(|(t, _)| *t == p.arrival) {
+                        Some(i) => ready.swap_remove(i).1,
+                        None => {
+                            // Заготовки нет: этот вариант и несколько следующих — параллельно.
+                            let width = threads.min(MAX_REFINE_ATTEMPTS + 1 - attempts.len());
+                            let mut next = speculate(&tried, shift_s, width.saturating_sub(1));
+                            next.retain(|t| !ready.iter().any(|(r, _)| r == t));
+                            next.insert(0, p.arrival);
+                            let mut got: Vec<_> = next.par_iter().map(|&t| (t, try_arrival(t))).collect();
+                            let res = got.remove(0).1;
+                            ready.extend(got);
+                            res
+                        }
+                    };
+                    let Some(alt) = res? else {
                         attempts.push(RefineAttempt {
                             arrival: p.arrival,
                             launch: p.launch,
@@ -1015,9 +1141,8 @@ async fn solve_transfers(
                         });
                         continue;
                     };
-                    refine_solution(&mut alt)?;
                     shift_s = shift_of(&alt).or(shift_s);
-                    let why = verdict(&alt);
+                    let why = verdict(&alt, constraint);
                     attempts.push(RefineAttempt {
                         arrival: p.arrival,
                         launch: Some(alt.launch.epoch),
@@ -1042,7 +1167,7 @@ async fn solve_transfers(
                 // не удалось — следующий по порядку.
                 let fastest = budget.as_ref().is_some_and(|b| b.objective == launch_window_prediction::trajectory::Objective::Fastest);
                 let mut order: Vec<usize> = (0..reports.len()).filter(|&i| reports[i].solution.is_some()).collect();
-                order.sort_by(|&a, &b| ranking_key(&reports[a], fastest).total_cmp(&ranking_key(&reports[b], fastest)));
+                order.sort_by(|&a, &b| ranking_key(&reports[a], fastest, mode).total_cmp(&ranking_key(&reports[b], fastest, mode)));
                 let mut done = None;
                 for &i in &order {
                     if refine_one(&mut reports[i])? {
@@ -1089,7 +1214,7 @@ async fn solve_transfers(
         .first()
         .and_then(|r| r.budget.as_ref())
         .is_some_and(|b| b.objective == launch_window_prediction::trajectory::Objective::Fastest);
-    reports.sort_by(|a, b| ranking_key(a, fastest).total_cmp(&ranking_key(b, fastest)));
+    reports.sort_by(|a, b| ranking_key(a, fastest, mode).total_cmp(&ranking_key(b, fastest, mode)));
     log.event(
         "transfer_ranking",
         reports
@@ -1098,17 +1223,85 @@ async fn solve_transfers(
                 "spaceport": r.spaceport.id,
                 "feasible": r.solution.is_some(),
                 "delta_v_total_km_s": r.solution.as_ref().map(|s| s.delta_v_total_km_s),
+                "delta_v_mission_km_s": r.solution.as_ref().map(|s| s.delta_v_mission_km_s),
+                "day": r.constraint,
+                "launch_window": r.launch_window.as_ref().map(|w| json!({
+                    "opens": launch_window_prediction::runlog::iso(&w.opens),
+                    "closes": launch_window_prediction::runlog::iso(&w.closes),
+                    "segments": w.segments.len(),
+                    "min_delta_v_mission_km_s": w.min_delta_v_mission_km_s,
+                })),
             }))
             .collect::<Vec<_>>(),
     );
     Ok(reports)
 }
 
-/// Порядок вариантов: по времени перелёта (цель «быстрее») или по суммарному Δv.
-fn ranking_key(r: &TransferReport, fastest: bool) -> f64 {
-    r.solution.as_ref().map_or(f64::INFINITY, |s| {
-        if fastest { s.departure.time_of_flight_s.to_seconds() } else { s.delta_v_total_km_s }
+/// Порядок вариантов: по времени перелёта (цель «быстрее»), по суммарному Δv (быстрый режим)
+/// или по суммарному Δv миссии со спуском (экономный режим и окно старта).
+fn ranking_key(r: &TransferReport, fastest: bool, mode: FlightMode) -> f64 {
+    if mode == FlightMode::LaunchWindow {
+        if let Some(w) = &r.launch_window {
+            return w.min_delta_v_mission_km_s;
+        }
+    }
+    r.solution.as_ref().map_or(f64::INFINITY, |s| match mode {
+        FlightMode::Economy | FlightMode::LaunchWindow => s.delta_v_mission_km_s,
+        FlightMode::Fast if fastest => s.departure.time_of_flight_s.to_seconds(),
+        FlightMode::Fast => s.delta_v_total_km_s,
     })
+}
+
+/// Экономный режим: выбранные сутки по космодромам и Δv миссии по суткам у лучшего.
+fn print_economy(reports: &[TransferReport]) {
+    let label = |c: DateConstraint| match c {
+        DateConstraint::LaunchDay(d) => format!("launch {}", &ts(d)[..10]),
+        DateConstraint::ArrivalDay(d) => format!("arrival {}", &ts(d)[..10]),
+    };
+    println!("Economy: chosen day per spaceport (mission delta-v = TLI + LOI + descent):");
+    for r in reports {
+        let Some(e) = &r.economy else { continue };
+        let saving = match e.saving_vs_requested_m_s {
+            Some(s) if e.chosen_shift_days != 0 => format!(", saves {s:.0} m/s vs the requested day"),
+            Some(s) if s > 0.0 => format!(", other days save less than {:.0} m/s ([economy] min_saving_m_s)", e.min_saving_m_s),
+            Some(_) => ", the requested day is the cheapest".to_string(),
+            None if e.chosen_delta_v_mission_km_s.is_some() => ", no transfer on the requested day".to_string(),
+            None => String::new(),
+        };
+        match e.chosen_delta_v_mission_km_s {
+            Some(dv) => println!(
+                "  {:<12} {} ({:+} d): {:.3} km/s{}",
+                r.spaceport.id,
+                label(e.chosen),
+                e.chosen_shift_days,
+                dv,
+                saving
+            ),
+            None => println!("  {:<12} no transfer within ±{} days", r.spaceport.id, e.date_shift_days),
+        }
+    }
+    if let Some((r, e)) = reports.first().and_then(|r| r.economy.as_ref().map(|e| (r, e))) {
+        println!("  Days checked for {} (formulas):", r.spaceport.id);
+        for d in &e.days {
+            match d.delta_v_mission_km_s {
+                Some(dv) => println!(
+                    "    {:+} d  {:<20} launch {}  {:>6.1} h of flight  mission Δv {:.3} km/s{}",
+                    d.shift_days,
+                    label(d.constraint),
+                    d.launch.map_or("-".into(), ts),
+                    d.time_of_flight_h.unwrap_or(f64::NAN),
+                    dv,
+                    if d.shift_days == e.chosen_shift_days { "  <- chosen" } else { "" }
+                ),
+                None => println!(
+                    "    {:+} d  {:<20} no transfer: {}",
+                    d.shift_days,
+                    label(d.constraint),
+                    d.reason.unwrap_or("no feasible transfer")
+                ),
+            }
+        }
+    }
 }
 
 /// Тип траектории для заголовков вывода.
@@ -1119,13 +1312,81 @@ fn trajectory_label(reports: &[TransferReport]) -> &'static str {
     }
 }
 
+/// Окно старта по космодромам.
+fn print_launch_window(reports: &[TransferReport]) {
+    let tm = |e: Epoch| ts(e);
+    println!("Launch window per spaceport (mission delta-v = TLI + LOI + descent; values from formulas):");
+    for r in reports {
+        let Some(w) = &r.launch_window else {
+            println!(
+                "  {:<12} no launch window: {}",
+                r.spaceport.id,
+                r.no_solution_reason.unwrap_or("no feasible transfer")
+            );
+            continue;
+        };
+        println!(
+            "  {:<12} opens {}  closes {}  ({:.1} h from first to last, {} interval(s), {:.0} min in total); \
+             least {:.3} km/s at launch {}, limit {:.3} km/s (+{:.0} m/s)",
+            r.spaceport.id,
+            tm(w.opens),
+            tm(w.closes),
+            w.span_h,
+            w.segments.len(),
+            w.open_total_min,
+            w.min_delta_v_mission_km_s,
+            tm(w.optimum.launch),
+            w.threshold_delta_v_mission_km_s,
+            w.margin_m_s,
+        );
+    }
+    if let Some((r, w)) = reports.first().and_then(|r| r.launch_window.as_ref().map(|w| (r, w))) {
+        println!(
+            "  Intervals for {} (launch times {} min apart or closer are merged; arrival step {:.0} min; {} of {} arrival times feasible, {} in the window):",
+            r.spaceport.id,
+            w.merge_gap_min,
+            w.arrival_step_min,
+            w.points_feasible,
+            w.points_checked,
+            w.points_in_window,
+        );
+        for g in &w.segments {
+            println!(
+                "    {} .. {}  {:>6.0} min  best {} -> landing {}  {:.3} km/s (max {:.3}), {} point(s)",
+                tm(g.opens),
+                tm(g.closes),
+                g.duration_min,
+                tm(g.best.launch),
+                g.best.landing.map_or_else(|| tm(g.best.arrival), tm),
+                g.best.delta_v_mission_km_s,
+                g.max_delta_v_mission_km_s,
+                g.points,
+            );
+        }
+    }
+}
+
 fn print_transfers(reports: &[TransferReport], constraint: DateConstraint) {
+    let economy = reports.iter().find_map(|r| r.economy.as_ref());
+    let window = reports.iter().any(|r| r.mode == FlightMode::LaunchWindow);
+    let around = |e: Option<&EconomyDays>| e.map_or(String::new(), |e| format!(" ± {} days", e.date_shift_days));
+    match economy {
+        Some(e) => println!(
+            "== Mode: economy — least total mission delta-v (TLI + LOI + descent), searching {} day(s) before and after the requested date",
+            e.date_shift_days
+        ),
+        None if window => println!("== Launch window: every launch time with mission delta-v within the margin of the least (best variant shown below)"),
+        None => println!("== Mode: fast"),
+    }
     match constraint {
-        DateConstraint::LaunchDay(d) => println!("== Transfer ({}): best launch on {d} (UTC day)", trajectory_label(reports)),
+        DateConstraint::LaunchDay(d) => {
+            println!("== Transfer ({}): best launch on {d} (UTC day){}", trajectory_label(reports), around(economy))
+        }
         DateConstraint::ArrivalDay(d) => println!(
-            "== Transfer ({}): best {} on {d} (UTC day)",
+            "== Transfer ({}): best {} on {d} (UTC day){}",
             trajectory_label(reports),
-            if reports.iter().any(|r| r.landing_site.is_some()) { "landing at the site" } else { "arrival" }
+            if reports.iter().any(|r| r.landing_site.is_some()) { "landing at the site" } else { "arrival" },
+            around(economy)
         ),
     }
     println!(
@@ -1154,6 +1415,12 @@ fn print_transfers(reports: &[TransferReport], constraint: DateConstraint) {
                 r.no_solution_reason.unwrap_or("no feasible transfer")
             ),
         }
+    }
+    if economy.is_some() {
+        print_economy(reports);
+    }
+    if window {
+        print_launch_window(reports);
     }
     if let Some((r, s)) = reports.first().and_then(|r| r.solution.as_ref().map(|s| (r, s))) {
         println!(

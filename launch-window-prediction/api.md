@@ -62,6 +62,7 @@ launch-window-prediction api [--jobs-dir DIR] [--pretty] <команда> [ар�
 {
   "arrival_date": "2027-02-14",
   "trajectory": "hohmann",
+  "mode": "economy",
   "spaceport": "baikonur",
   "rocket": "soyuz_21b_fregat",
   "landing_site": { "lat_deg": -89.0, "lon_deg": 45.0 }
@@ -73,6 +74,9 @@ launch-window-prediction api [--jobs-dir DIR] [--pretty] <команда> [ар�
 | `launch_date` | `"ГГГГ-ММ-ДД"` | сутки старта (UTC): найти лучший старт в эти сутки |
 | `arrival_date` | `"ГГГГ-ММ-ДД"` | сутки прилёта (UTC); с `landing_site` — **сутки посадки** в точку. Только одно из двух полей дат |
 | `trajectory` | строка | тип траектории: `"direct"` (по умолчанию; прямой перелёт, задача Ламберта) или `"hohmann"` (перелёт Гомана: разгон по касательной, апогей у Луны, 180°) |
+| `mode` | строка | режим полёта: `"fast"` (по умолчанию; лучший вариант в заданные сутки, как раньше) или `"economy"` (наименьший суммарный Δv миссии — разгон + торможение + спуск; поиск в пределах ±N суток от даты, секция `[economy]` в `transfer.toml`). Экономный режим считается дольше (по умолчанию 7 суток вместо одних) |
+| `launch_window` | логическое | `true` — рассчитать окно старта вместо быстрого/экономного режима: все моменты старта, при которых посадка в сутки `arrival_date` обходится не дороже наименьшего Δv миссии плюс запас. Только с `arrival_date`; с `launch_date` и `mode` — ошибка `bad_request`. По умолчанию `false` |
+| `launch_window_margin_m_s` | число | запас окна старта над наименьшим Δv миссии, м/с (по умолчанию `[launch_window] margin_m_s` = 50). Только вместе с `"launch_window": true` |
 | `spaceport` | строка | id космодрома (см. `catalog`); без него — все подходящие |
 | `rocket` | строка | id ракеты |
 | `rocket_overrides` | объект | переопределения параметров ракеты, `{ "payload_tli_kg": 9000 }` |
@@ -147,9 +151,15 @@ launch-window-prediction api [--jobs-dir DIR] [--pretty] <команда> [ар�
 
 ### Что внутри `summary`
 
-- `summary` — итог коротко: `status`, `trajectory` (`"direct_transfer"` или `"hohmann"`), космодром, ракета, аппарат, `launch_utc`,
+- `summary` — итог коротко: `status`, `trajectory` (`"direct_transfer"` или `"hohmann"`), `mode` (`"fast"`, `"economy"` или
+  `"launch_window"`), `economy` (только в экономном режиме: `requested` и `chosen` — заданные и выбранные сутки,
+  `chosen_shift_days`, `saving_vs_requested_m_s`, `days` — Δv миссии по каждым просмотренным суткам),
+  `launch_window` (только при `"launch_window": true`: `opens_utc` и `closes_utc` — первый и последний
+  подходящий старт, `span_h`, `open_total_min`, `margin_m_s`, `min_mission_delta_v_m_s` и
+  `limit_mission_delta_v_m_s`, `optimum` — самый экономный старт, `segments` — непрерывные интервалы с лучшим
+  стартом в каждом, `points_checked`/`points_feasible`/`points_in_window`), космодром, ракета, аппарат, `launch_utc`,
   `lunar_orbit_insertion_utc`, `touchdown_utc`, `timeline` (все этапы с UTC и временем от
-  старта), `durations`, `delta_v` (включая `tli_burn`: начало и конец разгона, потери, топливо),
+  старта), `durations`, `delta_v` (включая `mission_total_m_s` — разгон + торможение + спуск, и `tli_burn`: начало и конец разгона, потери, топливо),
   `spaceports_compared`, `variants_checked_by_refinement`; для перелёта Гомана — `hohmann`
   (номинальное время полёта, расхождение времени и допуск, полуось, перигей и апогей, промах
   апогея относительно расстояния до Луны, скорости в перигее и апогее).

@@ -60,6 +60,10 @@ fn help_and_errors_are_json_with_exit_codes() {
         ("{\"spaceport\": \"ksc\"}", "nothing to calculate"),
         ("{\"launch_date\": \"2027-01-01\", \"arrival_date\": \"2027-01-05\"}", "cannot be used with"),
         ("{\"launch_date\": \"2027-01-01\", \"spaceport\": \"mars\"}", "unknown spaceport"),
+        ("{\"launch_date\": \"2027-01-01\", \"mode\": \"slow\"}", "unknown mode"),
+        ("{\"launch_date\": \"2027-01-01\", \"launch_window\": true}", "only for a landing day"),
+        ("{\"arrival_date\": \"2027-02-14\", \"launch_window\": true, \"mode\": \"economy\"}", "replaces mode"),
+        ("{\"arrival_date\": \"2027-02-14\", \"launch_window_margin_m_s\": 30}", "needs"),
         ("{\"launch_date\": \"2027-01-01\", \"rocket\": \"sls_block1\", \"spaceport\": \"baikonur\"}", "does not launch from"),
         ("{\"launch_date\": \"2027-01-01\", \"kernels_dir\": \"no/such/dir\"}", "does not exist"),
     ] {

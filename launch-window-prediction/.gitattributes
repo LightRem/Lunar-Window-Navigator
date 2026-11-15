@@ -1,0 +1,9 @@
+* text=auto eol=lf
+
+# Двоичные данные: ядра эфемерид и карты рельефа
+*.bsp binary
+*.bpc binary
+*.pca binary
+*.epa binary
+*.IMG binary
+*.img binary

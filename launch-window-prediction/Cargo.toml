@@ -1,0 +1,47 @@
+[package]
+name = "launch-window-prediction"
+version = "0.1.0"
+edition = "2024"
+description = "Earth-Moon launch/arrival window prediction (NASA Space Apps 2026: Lunar Landing Site Navigator)"
+license = "Apache-2.0"
+
+# Точные версии зависимостей зафиксированы в Cargo.lock (он в репозитории).
+[dependencies]
+# Ядро: эфемериды, фреймы Земля/Луна, AER, затмения.
+# Типы Epoch/Duration (hifitime) и Vector3/Matrix3 (nalgebra) берём через ре-экспорт anise,
+# отдельно hifitime и nalgebra НЕ подключаем: так не будет двух несовместимых версий.
+anise = "0.10"
+
+# Async-рантайм (только I/O и оркестрация) + CPU-параллелизм для перебора сетки дат.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "time"] }
+rayon = "1"
+
+# Конфигурация аппарата, космодромы, результаты.
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "0.8"
+
+# Ошибки, логи, CLI.
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+
+# Рельеф Луны (LOLA): IMG читаем сами через mmap, GeoTIFF через tiff.
+memmap2 = "0.9"
+bytemuck = { version = "1", features = ["derive"] }
+tiff = "0.9"
+
+[dev-dependencies]
+approx = "0.5"
+proptest = "1"
+criterion = "0.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev.package."*"]
+# Зависимости в dev-сборке оптимизируем: иначе расчёты по сетке дат слишком медленные.
+opt-level = 2

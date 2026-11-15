@@ -1,0 +1,23 @@
+# Сборка Rust
+/target/
+
+# Результаты запусков (создаются программой)
+/logs/
+/cache/
+/jobs/
+/flight-*.json
+/flight-*.jsonl
+/trajectory-*.json
+
+# Карты рельефа LOLA: файлы .IMG по 115-530 МБ, GitHub не принимает файлы больше 100 МБ.
+# Описания .LBL лежат в репозитории; .IMG скачиваются отдельно (см. README).
+/data/terrain/*.IMG
+/data/terrain/*.img
+
+# Системное и редакторы
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,37 @@
+# Библиотека шаблонов лунных аппаратов (Presets). Встроена в программу при сборке.
+# Поля - по справочнику "Подсистема конфигурации лунного аппарата (Spacecraft Configuration)".
+# В шаблон попадают только аппараты, все базовые параметры которых есть в открытых источниках.
+# Свой аппарат можно описать профилем в data/spacecraft/custom/.
+
+[[preset]]
+id = "apollo_lm_ascent"
+name = "Apollo LM Ascent Stage"
+dry_mass_kg = 2132.0          # 4,700 lb
+propellant_mass_kg = 2359.0   # 5,200 lb
+payload_mass_kg = 0.0         # экипаж и образцы в источнике отдельно не указаны
+max_thrust_n = 15569.0        # 3,500 lbf
+isp_s = 311.0
+min_throttle_percent = 100.0  # двигатель APS работает без дросселирования
+source = "Masses: NASA ALSJ 'LM Reference: Lunar Module' (ascent stage dry ~4,700 lb, propellant ~5,200 lb). Engine: Ascent Propulsion System (Wikipedia infobox: 3,500 lbf vacuum, Isp 311 s)."
+
+[[preset]]
+id = "apollo_lm_descent"
+name = "Apollo LM Descent Stage"
+dry_mass_kg = 2767.0          # 6,100 lb
+propellant_mass_kg = 8845.0   # 19,500 lb
+payload_mass_kg = 4491.0      # заправленная взлётная ступень: 4,700 + 5,200 lb
+max_thrust_n = 46706.0        # 10,500 lbf
+isp_s = 311.0
+min_throttle_percent = 10.0
+source = "Masses: NASA ALSJ 'LM Reference: Lunar Module' (descent stage dry ~6,100 lb, propellant ~19,500 lb; ascent stage as payload). Engine: Descent Propulsion System (Wikipedia: 10,500 lbf max, 10% min throttle, Isp 311 s)."
+
+[[preset]]
+id = "blue_moon_mk2"
+name = "Blue Origin Blue Moon Mark 2"
+dry_mass_kg = 16000.0
+propellant_mass_kg = 29000.0  # оценка снизу: "более 45 000 кг" минус 16 000 кг сухой массы
+payload_mass_kg = 0.0         # полезная нагрузка пилотируемого варианта в источнике не указана
+max_thrust_n = 132000.0       # 3 x BE-7 по 44 кН
+isp_s = 460.0
+min_throttle_percent = 20.0
+source = "Wikipedia 'Blue Moon (spacecraft)': dry 16,000 kg, launch mass over 45,000 kg, 3 BE-7. Wikipedia 'BE-7': 44 kN, Isp 460 s, throttle 20-100%. Propellant mass is a derived lower-bound estimate."

@@ -1,0 +1,148 @@
+# Lunch Window Prediction
+
+Расчёт перелёта Земля → Луна для задачи **NASA Space Apps Challenge 2026 — Lunar Landing Site Navigator**.
+
+Программа по дате старта находит даты прилёта и посадки, и наоборот: по дате посадки находит дату старта.
+Точка посадки (широта и долгота на Луне) определяет даты. Если сесть нельзя, программа объясняет почему:
+нет Солнца или Земли над горизонтом, слишком крутой рельеф, не хватает Δv, нет окна старта и т. п.
+
+- **11 космодромов** с их ограничениями азимутов и наклонений (`data/spaceports.toml`).
+- **Ракеты и лунные аппараты:** готовые пресеты и переопределение любых параметров.
+- **Прямой перелёт.** Сначала поиск по формулам (patched conic, задача Ламберта), затем численное уточнение лучшего
+  варианта: интегратор Dormand–Prince, поле тяготения Луны GRAIL до степени 60, сжатие Земли, притяжение Солнца,
+  разгон к Луне конечной тягой, спуск с торможением.
+- **Проверка площадки** по рельефу LOLA (уклоны, перепад высот, горизонт) и видимость Солнца и Земли из точки посадки.
+- **Журналы в JSON:** траектория для 3D-визуализации и читаемый журнал полёта.
+- **API для других программ:** JSON через командную строку, расчёты фоновыми задачами.
+
+Эфемериды и системы координат дают [ANISE](https://github.com/nyx-space/anise) и ядра NAIF (DE440).
+
+## Быстрый старт
+
+Нужен Rust 1.85 или новее (edition 2024).
+
+```bash
+cargo build --release
+```
+
+Посадка на Южный полюс Луны 14 февраля 2027, старт с Байконура на «Союзе-2.1б» с «Фрегатом»:
+
+```bash
+target/release/launch-window-prediction --kernels-dir data/kernels \
+  --arrival-date 2027-02-14 --spaceport baikonur --rocket soyuz_21b_fregat --lat -89.0 --lon 45
+```
+
+Лучший старт 29 декабря 2026 со всех подходящих космодромов, без точки посадки:
+
+```bash
+target/release/launch-window-prediction --kernels-dir data/kernels --launch-date 2026-12-29
+```
+
+С проверкой рельефа (нужны карты LOLA, см. ниже) и лунным аппаратом:
+
+```bash
+target/release/launch-window-prediction --kernels-dir data/kernels --terrain-dir data/terrain \
+  --arrival-date 2027-01-01 --spaceport ksc --rocket sls_block1 --spacecraft apollo_lm_descent \
+  --lat 5 --lon -10
+```
+
+Все параметры: `launch-window-prediction --help`. Список аппаратов: `--list-spacecraft`.
+Параметр ракеты или аппарата переопределяется так: `--rk payload_tli_kg=9000`, `--sc payload_mass_kg=0`.
+
+## Данные
+
+| Папка | Что внутри | В репозитории |
+|---|---|---|
+| `data/kernels/` | ядра эфемерид: `de440s.bsp`, `moon_pa_de440_200625.bpc`, `moon_fk_de440.epa`, `earth_latest_high_prec.bpc`, `pck11.pca` (~51 МБ) | да |
+| `data/gravity/` | поле тяготения Луны GRAIL GL0660B до степени 60 | да |
+| `data/terrain/` | карты высот LOLA: описания `.LBL` | да |
+| `data/terrain/*.IMG` | сами карты высот (115–530 МБ каждая) | **нет**, скачать отдельно |
+| `data/*.toml` | космодромы, ракеты, аппараты, параметры перелёта, посадки, видимости | да |
+
+Ориентация Земли `earth_latest_high_prec.bpc` (ITRF93) покрывает даты примерно до февраля 2027.
+Для более поздних дат программа сама переходит на модель IAU_EARTH. Свежее ядро можно скачать флагом
+`--download-kernels` (нужен интернет).
+
+### Карты рельефа LOLA
+
+Без карт программа работает, но не проверяет площадку и считает горизонт ровным.
+Для проверки рельефа положите файлы `.IMG` в `data/terrain/` рядом с одноимёнными `.LBL`:
+
+| Файл | Покрытие | Размер |
+|---|---|---|
+| `LDEM_64.IMG` | вся Луна, 64 пикс./град (~474 м) | 531 МБ |
+| `LDEM_80S_80M.IMG` | южная полярная область от 80° ю. ш., 80 м | 116 МБ |
+| `LDEM_80N_80M.IMG` | северная полярная область от 80° с. ш., 80 м | 116 МБ |
+| `LDEM_875S_10M.IMG` | окрестность Южного полюса от 87,5° ю. ш., 10 м | 460 МБ |
+
+Источник: набор данных `LRO-L-LOLA-4-GDR-V1.0` (LRO LOLA Gridded Data Records), узел NASA PDS Geosciences,
+https://pds-geosciences.wustl.edu/ — раздел LRO / LOLA, папки `lola_gdr/cylindrical/img` и `lola_gdr/polar/img`.
+Можно положить только нужные карты: программа берёт самую подробную из тех, что покрывают точку.
+
+## Результаты
+
+Каждый запуск пишет в `logs/`:
+
+- `flight-<время>.json` — журнал полёта в читаемом JSON: сводка, космодром, место посадки, этапы, все шаги расчёта;
+- `trajectory-<время>.json` — траектория для 3D (формат `lwp-trajectory/1`, описан в [trajectory-format.md](trajectory-format.md)).
+
+## API для других программ
+
+```bash
+echo '{"arrival_date":"2027-02-14","spaceport":"baikonur","rocket":"soyuz_21b_fregat","landing_site":{"lat_deg":-89,"lon_deg":45}}' \
+  | target/release/launch-window-prediction api submit --wait --pretty
+```
+
+Команды `catalog`, `submit`, `status`, `result`, `list`, `delete`, а также форматы запросов и ответов и пример
+клиента на Python описаны в [api.md](api.md).
+
+## Тесты
+
+```bash
+cargo test --release                      # быстрые тесты
+cargo test --release -- --ignored         # тесты на реальных эфемеридах (дольше)
+cargo test --release --test timing -- --ignored --nocapture   # замер времени расчёта
+```
+
+## Структура
+
+```text
+src/
+  main.rs            командная строка, порядок расчёта
+  api.rs             API: JSON на вход и выход, фоновые задачи
+  trajectory.rs      поиск прямого перелёта по формулам (окна старта, наклонения, Ламберт)
+  refine.rs          численное уточнение: прицеливание, конечный разгон, спуск
+  propagate.rs       интегратор Dormand–Prince 5(4)
+  gravity.rs         поле тяготения Луны GRAIL
+  lambert.rs         задача Ламберта
+  ascent.rs          моделирование подъёма ракеты по ступеням
+  lunar_landing.rs   окно посадки: плоскость орбиты, сход, торможение, условия Солнца и Земли
+  landing.rs         проверка площадки по рельефу
+  terrain.rs         чтение карт LOLA
+  visibility.rs, sky.rs   видимость Солнца и Земли из точки на Луне
+  spaceport.rs       космодромы и их ограничения
+  launch_vehicle.rs, spacecraft.rs   ракеты и аппараты: пресеты и переопределения
+  ephemeris.rs       загрузка ядер ANISE
+  flightlog.rs, runlog.rs, trajlog.rs   журналы JSON
+data/                исходные данные и настройки (см. выше)
+tests/               интеграционные тесты и замер времени
+```
+
+## Ограничения модели
+
+- Только прямой перелёт; другие типы траекторий (через точки Лагранжа, с низкой энергией) не реализованы.
+- Выход на окололунную орбиту и сход с неё считаются импульсными.
+- Не учитываются погода, суточные ограничения на время старта, давление солнечного света и сопротивление атмосферы.
+- Посадка на обратную сторону Луны по умолчанию запрещена: нет прямой связи с Землёй. Разрешить можно в
+  `data/transfer.toml` (`require_earth_visible = false`); спутник-ретранслятор в модели не учитывается.
+- Данные ракет со ступенями есть для SLS, Long March 5, Ariane 62/64, «Союза-2.1б»; для остальных космодромов
+  подъём упрощённый.
+
+## Источники данных
+
+- NAIF SPICE generic kernels (JPL): https://naif.jpl.nasa.gov/pub/naif/generic_kernels/
+- ANISE (nyx-space): https://github.com/nyx-space/anise
+- LRO LOLA Gridded Data Records, NASA PDS Geosciences Node: https://pds-geosciences.wustl.edu/
+- GRAIL GL0660B gravity model, NASA PDS
+- Координаты и ограничения космодромов: источники указаны в `data/spaceports.toml` (`limits_source`)
+- Параметры ракет и аппаратов: источники указаны в `data/launch_vehicles/presets.toml` и `data/spacecraft/presets.toml`

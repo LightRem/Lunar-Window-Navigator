@@ -56,6 +56,14 @@ struct Cli {
     #[arg(long, conflicts_with = "arrival_date")]
     launch_date: Option<String>,
 
+    /// Искать старт только после этого времени суток (UTC), ЧЧ:ММ. Только с --launch-date.
+    #[arg(long, requires = "launch_date", value_name = "HH:MM")]
+    launch_from_utc: Option<String>,
+
+    /// Искать старт только до этого времени суток (UTC), ЧЧ:ММ (24:00 — конец суток). Только с --launch-date.
+    #[arg(long, requires = "launch_date", value_name = "HH:MM")]
+    launch_to_utc: Option<String>,
+
     /// Дата прилёта (UTC), ГГГГ-ММ-ДД. С точкой посадки (--lat/--lon) — сутки посадки в эту точку,
     /// без неё — сутки прилёта к Луне. Находит лучший вариант и дату старта.
     #[arg(long)]
@@ -168,6 +176,14 @@ struct Cli {
     /// Папка пользовательских профилей аппаратов.
     #[arg(long, default_value = "data/spacecraft/custom")]
     spacecraft_dir: PathBuf,
+}
+
+/// Время суток ЧЧ:ММ -> часы (24:00 допустимо).
+fn parse_hhmm(s: &str) -> anyhow::Result<f64> {
+    let (h, m) = s.split_once(':').ok_or_else(|| anyhow::anyhow!("time of day must be HH:MM, got {s:?}"))?;
+    let (h, m): (u32, u32) = (h.trim().parse()?, m.trim().parse()?);
+    anyhow::ensure!(m < 60 && (h < 24 || (h == 24 && m == 0)), "time of day out of range: {s:?}");
+    Ok(f64::from(h) + f64::from(m) / 60.0)
 }
 
 /// Явно указанный файл обязателен; файл по умолчанию — только если существует.
@@ -710,6 +726,13 @@ async fn solve_transfers(
     };
     log.event("config_transfer", json!({ "path": path, "built_in_defaults": path.is_none(), "config": cfg }));
     let mut cfg = cfg;
+    if let Some(t) = &cli.launch_from_utc {
+        cfg.transfer.launch_from_utc_h = parse_hhmm(t)?;
+    }
+    if let Some(t) = &cli.launch_to_utc {
+        cfg.transfer.launch_to_utc_h = parse_hhmm(t)?;
+    }
+    cfg.transfer.validate()?;
     if let Some((r, cap)) = rocket {
         // Параметры ракеты заменяют допущения из transfer.toml.
         let dt = &mut cfg.transfer;

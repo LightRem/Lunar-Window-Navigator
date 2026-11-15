@@ -71,6 +71,10 @@ pub struct TransferCommonConfig {
     pub ascent_duration_min: f64,
     /// Дальность от космодрома до точки выхода на опорную орбиту по поверхности, км.
     pub ascent_downrange_km: f64,
+    /// Часть суток старта (UTC), в которой ищется старт при `--launch-date`: от и до, часы 0..24.
+    /// По умолчанию вся сутки. Не влияет на поиск по дате прилёта.
+    pub launch_from_utc_h: f64,
+    pub launch_to_utc_h: f64,
 }
 
 impl Default for TransferCommonConfig {
@@ -87,13 +91,15 @@ impl Default for TransferCommonConfig {
             // SLS — около 8 мин до отделения центральной ступени. Дальность ~2000 км.
             ascent_duration_min: 10.0,
             ascent_downrange_km: 2000.0,
+            launch_from_utc_h: 0.0,
+            launch_to_utc_h: 24.0,
         }
     }
 }
 
 impl TransferCommonConfig {
     /// Имена параметров секции (для подсказки при старом формате файла).
-    pub const FIELDS: [&'static str; 9] = [
+    pub const FIELDS: [&'static str; 11] = [
         "parking_altitude_km",
         "lunar_orbit_altitude_km",
         "coast_min_min",
@@ -103,6 +109,8 @@ impl TransferCommonConfig {
         "max_tli_delta_v_km_s",
         "ascent_duration_min",
         "ascent_downrange_km",
+        "launch_from_utc_h",
+        "launch_to_utc_h",
     ];
 
     pub fn validate(&self) -> Result<()> {
@@ -130,6 +138,9 @@ impl TransferCommonConfig {
         }
         if !(self.ascent_downrange_km >= 0.0 && self.ascent_downrange_km <= 5000.0) {
             return bad("ascent_downrange_km must be in [0, 5000]");
+        }
+        if !(self.launch_from_utc_h >= 0.0 && self.launch_to_utc_h > self.launch_from_utc_h && self.launch_to_utc_h <= 24.0) {
+            return bad("need 0 <= launch_from_utc_h < launch_to_utc_h <= 24");
         }
         if self.coast_min_min < self.ascent_duration_min {
             return bad("coast_min_min (time from launch to TLI) must be at least ascent_duration_min");
@@ -1320,7 +1331,11 @@ impl<M: LegModel> Transfer<M> {
         // раньше на время ожидания на орбите и спуска (полвитка эллипса + торможение, < 2 ч).
         let wait = landing.map_or(Duration::ZERO, |l| l.window.max_wait_in_orbit_h * Unit::Hour + 2 * Unit::Hour);
         let (launch_lo, launch_hi, ta_lo, ta_hi) = match constraint {
-            DateConstraint::LaunchDay(d) => (d, d + day, d + coast_min + tof_min, d + day + coast_max + tof_max),
+            DateConstraint::LaunchDay(d) => {
+                let lo = d + cfg.launch_from_utc_h * Unit::Hour;
+                let hi = d + cfg.launch_to_utc_h * Unit::Hour;
+                (lo, hi, lo + coast_min + tof_min, hi + coast_max + tof_max)
+            }
             DateConstraint::ArrivalDay(d) => {
                 (d - wait - tof_max - coast_max, d + day - tof_min - coast_min, d - wait, d + day)
             }

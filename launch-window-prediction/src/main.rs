@@ -14,6 +14,7 @@ use launch_window_prediction::launch_vehicle::{
     LaunchCapability, LaunchVehicleLibrary, LaunchVehicleParams, ResolvedLaunchVehicle,
 };
 use launch_window_prediction::flightlog;
+use launch_window_prediction::gdrive;
 use launch_window_prediction::runlog::{RunLog, iso_short};
 use launch_window_prediction::sky::sky_series;
 use launch_window_prediction::spacecraft::{ResolvedSpacecraft, Severity, SpacecraftLibrary, SpacecraftParams};
@@ -34,6 +35,8 @@ mod api;
 const DEFAULT_VISIBILITY_CONFIG: &str = "data/visibility.toml";
 const DEFAULT_LANDING_CONFIG: &str = "data/landing.toml";
 const DEFAULT_TRANSFER_CONFIG: &str = "data/transfer.toml";
+const DEFAULT_KERNELS_DIR: &str = "data/kernels";
+const DEFAULT_TERRAIN_DIR: &str = "data/terrain";
 /// Сколько вариантов прилёта проверить численным уточнением, если лучший не подошёл.
 const MAX_REFINE_ATTEMPTS: usize = 8;
 
@@ -89,6 +92,10 @@ struct Cli {
     /// без неё горизонт считается ровным.
     #[arg(long)]
     terrain_dir: Option<PathBuf>,
+
+    /// Автовибір карт рельефу з Google Drive або data/terrain (використовується API).
+    #[arg(long, hide = true)]
+    auto_terrain: bool,
 
     /// Высота поверхности над опорной сферой, м (только без --terrain-dir).
     #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
@@ -227,11 +234,25 @@ fn ts(e: Epoch) -> String {
     format!("{}", e.round(1 * Unit::Second))
 }
 
-fn almanac_source(cli: &Cli) -> Option<AlmanacSource> {
+async fn resolve_almanac_source(cli: &Cli) -> anyhow::Result<Option<AlmanacSource>> {
     match (&cli.kernels_dir, cli.download_kernels) {
-        (Some(dir), _) => Some(AlmanacSource::LocalDir(dir.clone())),
-        (None, true) => Some(AlmanacSource::Latest),
-        (None, false) => None,
+        (Some(dir), _) => Ok(Some(AlmanacSource::LocalDir(dir.clone()))),
+        (None, true) => Ok(Some(AlmanacSource::Latest)),
+        (None, false) => {
+            if !gdrive::prefer_local() && gdrive::has_kernels() {
+                let dir = tokio::task::spawn_blocking(gdrive::ensure_kernels_dir).await??;
+                return Ok(Some(AlmanacSource::LocalDir(dir)));
+            }
+            let local = PathBuf::from(DEFAULT_KERNELS_DIR);
+            if gdrive::dir_has_kernel_files(&local) {
+                return Ok(Some(AlmanacSource::LocalDir(local)));
+            }
+            if gdrive::has_kernels() {
+                let dir = tokio::task::spawn_blocking(gdrive::ensure_kernels_dir).await??;
+                return Ok(Some(AlmanacSource::LocalDir(dir)));
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -418,14 +439,40 @@ async fn run(cli: &Cli, log: Arc<RunLog>) -> anyhow::Result<&'static str> {
         log.section("launch_site", flightlog::spaceport_info(p));
     }
 
-    // Карты рельефа: чтение — блокирующий I/O, уводим из async-рантайма.
-    let terrain = match cli.terrain_dir.clone() {
+    // Карты рельефа: Google Drive (с фильтрацией по точке) или локальная папка.
+    let resolved_terrain_dir = match cli.terrain_dir.clone() {
+        Some(dir) => Some(dir),
+        None if cli.auto_terrain => {
+            if !gdrive::prefer_local() && gdrive::has_terrain() {
+                Some(
+                    tokio::task::spawn_blocking(move || {
+                        gdrive::ensure_terrain_dir(site, std::path::Path::new(DEFAULT_TERRAIN_DIR))
+                    })
+                    .await??,
+                )
+            } else if gdrive::dir_has_terrain_images(std::path::Path::new(DEFAULT_TERRAIN_DIR)) {
+                Some(PathBuf::from(DEFAULT_TERRAIN_DIR))
+            } else if gdrive::has_terrain() {
+                Some(
+                    tokio::task::spawn_blocking(move || {
+                        gdrive::ensure_terrain_dir(site, std::path::Path::new(DEFAULT_TERRAIN_DIR))
+                    })
+                    .await??,
+                )
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+    // Чтение — блокирующий I/O, уводим из async-рантайма.
+    let terrain = match resolved_terrain_dir.clone() {
         Some(dir) => {
             let t = Arc::new(tokio::task::spawn_blocking(move || TerrainSet::open_dir(dir)).await??);
             log.event(
                 "terrain_maps",
                 json!({
-                    "dir": cli.terrain_dir,
+                    "dir": resolved_terrain_dir,
                     "maps": t.maps().iter().map(|m| json!({ "name": m.name(), "meta": m.meta() })).collect::<Vec<_>>(),
                 }),
             );
@@ -448,16 +495,18 @@ async fn run(cli: &Cli, log: Arc<RunLog>) -> anyhow::Result<&'static str> {
     }
 
     let needs_kernels = date.is_some() || cli.start.is_some();
+    let resolved_source = resolve_almanac_source(cli).await?;
     if !needs_kernels {
-        if let Some(source) = almanac_source(cli) {
+        if let Some(source) = resolved_source {
+            let source_dbg = format!("{source:?}");
             load_almanac(source).await?;
             tracing::info!("almanac loaded");
-            log.event("almanac_loaded", json!({ "source": format!("{:?}", almanac_source(cli)) }));
+            log.event("almanac_loaded", json!({ "source": source_dbg }));
         }
         return Ok("done");
     }
-    let Some(source) = almanac_source(cli) else {
-        anyhow::bail!("trajectory and visibility need kernels: add --download-kernels or --kernels-dir");
+    let Some(source) = resolved_source else {
+        anyhow::bail!("trajectory and visibility need kernels: add --download-kernels, --kernels-dir, or configure drive-manifest.json");
     };
     let almanac = Arc::new(load_almanac(source.clone()).await?);
     tracing::info!("almanac loaded");

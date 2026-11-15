@@ -11,6 +11,7 @@ license = "Apache-2.0"
 # Типы Epoch/Duration (hifitime) и Vector3/Matrix3 (nalgebra) берём через ре-экспорт anise,
 # отдельно hifitime и nalgebra НЕ подключаем: так не будет двух несовместимых версий.
 anise = "0.10"
+ureq = "3"
 
 # Async-рантайм (только I/O и оркестрация) + CPU-параллелизм для перебора сетки дат.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "time"] }

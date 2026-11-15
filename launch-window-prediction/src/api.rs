@@ -29,8 +29,6 @@ use super::{Cli, execute, parse_date};
 pub const API_VERSION: &str = "lwp-api/1";
 
 const DEFAULT_JOBS_DIR: &str = "jobs";
-const DEFAULT_KERNELS_DIR: &str = "data/kernels";
-const DEFAULT_TERRAIN_DIR: &str = "data/terrain";
 const DEFAULT_SPACEPORTS: &str = "data/spaceports.toml";
 const DEFAULT_ROCKET_DIR: &str = "data/launch_vehicles/custom";
 const DEFAULT_SPACECRAFT_DIR: &str = "data/spacecraft/custom";
@@ -315,19 +313,21 @@ impl Request {
         }
         if self.download_kernels {
             a.push("--download-kernels".into());
-        } else {
-            push("--kernels-dir", self.kernels_dir.clone().unwrap_or_else(|| DEFAULT_KERNELS_DIR.into()));
+        } else if let Some(dir) = &self.kernels_dir {
+            push("--kernels-dir", dir.clone());
+        }
+        match self.terrain_dir.as_deref() {
+            Some("") => {}
+            Some(d) => {
+                a.push("--terrain-dir".into());
+                a.push(d.into());
+            }
+            None => a.push("--auto-terrain".into()),
         }
         let mut push = |k: &str, v: String| {
             a.push(k.into());
             a.push(v);
         };
-        match self.terrain_dir.as_deref() {
-            Some("") => {}
-            Some(d) => push("--terrain-dir", d.into()),
-            None if Path::new(DEFAULT_TERRAIN_DIR).is_dir() => push("--terrain-dir", DEFAULT_TERRAIN_DIR.into()),
-            None => {}
-        }
         for (flag, v) in [
             ("--transfer-config", &self.transfer_config),
             ("--landing-config", &self.landing_config),

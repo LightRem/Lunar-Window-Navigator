@@ -2,6 +2,7 @@ pub mod ephemeris;
 pub mod ascent;
 pub mod error;
 pub mod flightlog;
+pub mod gdrive;
 pub mod gravity;
 pub mod lambert;
 pub mod landing;

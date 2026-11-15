@@ -10,10 +10,16 @@
 /trajectory-*.json
 
 # Карты рельефа LOLA: файлы .IMG по 115-530 МБ, GitHub не принимает файлы больше 100 МБ.
-# Описания .LBL лежат в репозитории; .IMG скачиваются отдельно (см. README).
+# Описания .LBL лежат в репозитории; .IMG скачиваются отдельно (см. README) або з Google Drive.
 /data/terrain/*.IMG
 /data/terrain/*.img
 /data/terrain/*.part
+
+# SPICE/ANISE ядра (загружаются з Google Drive через drive-manifest.json)
+/data/kernels/*.bsp
+/data/kernels/*.bpc
+/data/kernels/*.pca
+/data/kernels/*.epa
 
 # Системное и редакторы
 .DS_Store

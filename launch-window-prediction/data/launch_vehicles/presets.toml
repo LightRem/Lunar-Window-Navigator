@@ -1,0 +1,249 @@
+# Каталог ракет-носителей (Presets). Встроен в программу при сборке.
+# Та же гибридная схема, что у лунных аппаратов: шаблон -> переопределение -> свой профиль
+# в data/launch_vehicles/custom/.
+#
+# В каталог попадают только ракеты, для которых в открытых источниках есть грузоподъёмность
+# к Луне (TLI) и параметры разгонной ступени, выполняющей разгон к Луне.
+#
+# Поля:
+#   spaceports                  - космодромы (id из data/spaceports.toml), откуда летает ракета;
+#                                 пользовательская ракета (свой профиль или шаблон с изменениями)
+#                                 стартует с любого космодрома, это поле у неё не учитывается
+#   payload_tli_kg              - масса, которую ракета отправляет к Луне (TLI), кг
+#   payload_leo_kg / _gto_kg    - справочно, кг
+#   upper_stage_*               - разгонная ступень: сухая масса, топливо, тяга, Isp
+#   ascent_duration_s, max_coast_s, parking_altitude_km - необязательно (если известно)
+#   [preset.ascent]             - ступени для моделирования подъёма до опорной орбиты (src/ascent.rs):
+#       boosters                - ускорители со старта (count - число, массы и тяга - на один блок);
+#                                 у твердотопливных - burn_time_s и thrust_profile
+#                                 (доля времени, доля наибольшей тяги), наибольшая тяга
+#                                 вычисляется из массы топлива и Isp
+#       stages                  - ступени по порядку, первая включается на старте
+#       upper_stage_in_ascent   - разгонная ступень (upper_stage_*) довыводит на орбиту
+#       fairing_mass_kg         - сбрасываемый обтекатель, fairing_jettison_altitude_km - высота сброса
+#   Значения, помеченные "ДОПУЩЕНИЕ", не опубликованы и оценены (см. комментарий у значения).
+
+[[preset]]
+id = "sls_block1"
+name = "SLS Block 1 (ICPS)"
+spaceports = ["ksc"]
+payload_tli_kg = 27000.0
+upper_stage_name = "ICPS (RL10B-2)"
+upper_stage_dry_mass_kg = 3800.0
+upper_stage_propellant_kg = 28948.0   # полная масса 32 748 кг минус сухая 3 800 кг
+upper_stage_thrust_n = 110100.0
+upper_stage_isp_s = 462.0
+source = "TLI 27 t: NASA, 'Space Launch System Update' (SciTech 2024, NTRS 20230017105). ICPS: Wikipedia 'Delta Cryogenic Second Stage' (5 m ICPS: empty 3,800 kg, gross 32,748 kg, RL10B-2 110.1 kN, Isp 462 s)."
+
+[preset.ascent]
+upper_stage_in_ascent = true
+upper_stage_diameter_m = 5.1
+fairing_mass_kg = 0.0          # груз - лунный аппарат без обтекателя (Orion и САС в модель не входят)
+vertical_rise_s = 7.0
+stage_coast_s = 6.0
+pitch_kick_deg = 2.0
+source = "Wikipedia 'Space Launch System' (SRB: 730 t gross, 14.6/16 MN SL/vac, Isp 269 s, 126 s; core: 97,940 kg empty, 144 t LH2 + 840 t LOX, 7.4/9.1 MN, Isp 366/452 s, 8.4 m). NASA 'Artemis I Mission Timeline' (max-Q 1:10, SRB sep 2:12, MECO 8:03). SRB propellant 631 t and thrust profile shape: ASSUMPTION (five-segment booster ~1.4 Mlb propellant, regressive-progressive grain)."
+
+[preset.ascent.boosters]
+name = "5-segment SRB"
+count = 2
+dry_mass_kg = 99000.0          # 730 t полная масса - 631 t топлива (ДОПУЩЕНИЕ по массе топлива)
+propellant_kg = 631000.0       # ДОПУЩЕНИЕ: ~1.4 млн фунтов
+isp_vac_s = 269.0
+isp_sl_s = 245.5               # из отношения тяги у земли и в пустоте 14.6 / 16 МН
+burn_time_s = 126.0
+# ДОПУЩЕНИЕ: форма профиля тяги пятисегментного ускорителя (провал на максимальном напоре).
+thrust_profile = [[0.0, 0.95], [0.05, 1.0], [0.18, 0.97], [0.36, 0.80], [0.5, 0.78], [0.64, 0.84], [0.8, 0.74], [0.9, 0.5], [0.96, 0.18], [1.0, 0.0]]
+diameter_m = 3.71
+
+[[preset.ascent.stages]]
+name = "Core stage (4 x RS-25)"
+dry_mass_kg = 97940.0
+propellant_kg = 984000.0
+thrust_vac_n = 9100000.0
+thrust_sl_n = 7400000.0
+isp_vac_s = 452.0
+isp_sl_s = 366.0
+diameter_m = 8.4
+
+[[preset]]
+id = "long_march_5"
+name = "Long March 5"
+spaceports = ["wenchang"]
+payload_tli_kg = 8800.0               # нижняя граница диапазона 8 800-9 400 кг
+payload_gto_kg = 14000.0
+upper_stage_name = "CZ-5-HO (2 x YF-75D)"
+upper_stage_dry_mass_kg = 5100.0
+upper_stage_propellant_kg = 29100.0
+upper_stage_thrust_n = 176720.0
+upper_stage_isp_s = 442.6
+source = "Wikipedia 'Long March 5': TLI 8,800-9,400 kg, GTO 14,000 kg; second stage 2 x YF-75D, 176.72 kN, Isp 442.6 s, empty 5,100 kg, propellant 29,100 kg; launch site Wenchang."
+
+[preset.ascent]
+upper_stage_in_ascent = true
+upper_stage_diameter_m = 5.0
+fairing_mass_kg = 4500.0       # ДОПУЩЕНИЕ: обтекатель 5.2 м не опубликован
+vertical_rise_s = 10.0
+stage_coast_s = 5.0
+pitch_kick_deg = 3.0
+source = "Wikipedia 'Long March 5': boosters 4 x CZ-5-300 (156.6 t gross, 13.8 t empty, 2 x YF-100: 2,400/2,680 kN SL/vac, Isp 300/335.1 s, 173 s, 3.35 m); first stage CZ-5-500 (186.9 t gross, 165.3 t propellant, 2 x YF-77: 1,036/1,400 kN, Isp 316.7/428 s, 492 s, 5 m); second stage = upper stage. Fairing mass: ASSUMPTION."
+
+[preset.ascent.boosters]
+name = "CZ-5-300 booster"
+count = 4
+dry_mass_kg = 13800.0
+propellant_kg = 142800.0       # 156.6 t - 13.8 t
+thrust_vac_n = 2680000.0
+thrust_sl_n = 2400000.0
+isp_vac_s = 335.1
+isp_sl_s = 300.0
+diameter_m = 3.35
+
+[[preset.ascent.stages]]
+name = "CZ-5-500 core (2 x YF-77)"
+dry_mass_kg = 21600.0          # 186.9 t - 165.3 t
+propellant_kg = 165300.0
+thrust_vac_n = 1400000.0
+thrust_sl_n = 1036000.0
+isp_vac_s = 428.0
+isp_sl_s = 316.7
+diameter_m = 5.0
+
+[[preset]]
+id = "ariane_64"
+name = "Ariane 64"
+spaceports = ["kourou"]
+payload_tli_kg = 8200.0               # нижняя граница диапазона 8 200-8 500 кг
+payload_leo_kg = 21600.0
+payload_gto_kg = 11500.0
+upper_stage_name = "ULPM (Vinci)"
+upper_stage_dry_mass_kg = 6000.0      # "ca. 6 t unbetankt"
+upper_stage_propellant_kg = 33000.0   # 28 t LOX + 5 t LH2
+upper_stage_thrust_n = 180000.0
+upper_stage_isp_s = 457.2
+source = "Payloads: Arianespace Ariane 6 flyer (lunar transfer 8,200-8,500 kg, LEO 21,600 kg, GTO >11,500 kg). Upper stage: DLR factsheet Ariane 6 Oberstufe (28 t LOX / 5 t LH2, ~6 t unfueled, 180 kN). Vinci Isp 457.2 s: Wikipedia 'Vinci (rocket engine)'."
+
+[preset.ascent]
+upper_stage_in_ascent = true
+upper_stage_diameter_m = 5.4
+fairing_mass_kg = 2700.0       # ДОПУЩЕНИЕ: длинный обтекатель (как у Ariane 5, 2 675 кг)
+vertical_rise_s = 8.0
+stage_coast_s = 6.0
+pitch_kick_deg = 3.0
+source = "Wikipedia 'Ariane 6': P120C 153 t gross, 141.4 t propellant, Isp ~280 s, 134 s; LLPM 140 t propellant, Vulcain 2.1 up to 1,370 kN, 5.4 m. ASSUMPTIONS: P120C sea-level Isp 250 s and thrust profile shape; LLPM dry mass 15 t (from liftoff mass balance); Vulcain 2.1 Isp 431/318 s vac/SL (Vulcain 2 values, Wikipedia 'Vulcain')."
+
+[preset.ascent.boosters]
+name = "P120C"
+count = 4
+dry_mass_kg = 11600.0          # 153 t - 141.4 t
+propellant_kg = 141400.0
+isp_vac_s = 279.0
+isp_sl_s = 250.0               # ДОПУЩЕНИЕ
+burn_time_s = 134.0
+# ДОПУЩЕНИЕ: регрессивный профиль тяги (наибольшая ~4.6 МН в начале, средняя ~2.9 МН).
+thrust_profile = [[0.0, 1.0], [0.1, 0.97], [0.3, 0.82], [0.5, 0.65], [0.7, 0.52], [0.85, 0.42], [0.95, 0.25], [1.0, 0.0]]
+diameter_m = 3.4
+
+[[preset.ascent.stages]]
+name = "LLPM core (Vulcain 2.1)"
+dry_mass_kg = 15000.0          # ДОПУЩЕНИЕ
+propellant_kg = 140000.0
+thrust_vac_n = 1370000.0
+isp_vac_s = 431.0              # ДОПУЩЕНИЕ (Vulcain 2)
+isp_sl_s = 318.0               # ДОПУЩЕНИЕ (Vulcain 2)
+diameter_m = 5.4
+
+[[preset]]
+id = "ariane_62"
+name = "Ariane 62"
+spaceports = ["kourou"]
+payload_tli_kg = 2800.0               # нижняя граница диапазона 2 800-3 000 кг
+payload_leo_kg = 10300.0
+payload_gto_kg = 4500.0
+upper_stage_name = "ULPM (Vinci)"
+upper_stage_dry_mass_kg = 6000.0
+upper_stage_propellant_kg = 33000.0
+upper_stage_thrust_n = 180000.0
+upper_stage_isp_s = 457.2
+source = "Payloads: Arianespace Ariane 6 flyer (lunar transfer 2,800-3,000 kg, LEO 10,300 kg, GTO 4,500-5,000 kg). Upper stage: DLR factsheet Ariane 6 Oberstufe. Vinci Isp: Wikipedia 'Vinci (rocket engine)'."
+
+[preset.ascent]
+upper_stage_in_ascent = true
+upper_stage_diameter_m = 5.4
+fairing_mass_kg = 2700.0       # ДОПУЩЕНИЕ: длинный обтекатель (как у Ariane 5, 2 675 кг)
+vertical_rise_s = 8.0
+stage_coast_s = 6.0
+pitch_kick_deg = 3.0
+source = "Wikipedia 'Ariane 6': P120C 153 t gross, 141.4 t propellant, Isp ~280 s, 134 s; LLPM 140 t propellant, Vulcain 2.1 up to 1,370 kN, 5.4 m. ASSUMPTIONS: P120C sea-level Isp 250 s and thrust profile shape; LLPM dry mass 15 t (from liftoff mass balance); Vulcain 2.1 Isp 431/318 s vac/SL (Vulcain 2 values, Wikipedia 'Vulcain')."
+
+[preset.ascent.boosters]
+name = "P120C"
+count = 2
+dry_mass_kg = 11600.0          # 153 t - 141.4 t
+propellant_kg = 141400.0
+isp_vac_s = 279.0
+isp_sl_s = 250.0               # ДОПУЩЕНИЕ
+burn_time_s = 134.0
+# ДОПУЩЕНИЕ: регрессивный профиль тяги (наибольшая ~4.6 МН в начале, средняя ~2.9 МН).
+thrust_profile = [[0.0, 1.0], [0.1, 0.97], [0.3, 0.82], [0.5, 0.65], [0.7, 0.52], [0.85, 0.42], [0.95, 0.25], [1.0, 0.0]]
+diameter_m = 3.4
+
+[[preset.ascent.stages]]
+name = "LLPM core (Vulcain 2.1)"
+dry_mass_kg = 15000.0          # ДОПУЩЕНИЕ
+propellant_kg = 140000.0
+thrust_vac_n = 1370000.0
+isp_vac_s = 431.0              # ДОПУЩЕНИЕ (Vulcain 2)
+isp_sl_s = 318.0               # ДОПУЩЕНИЕ (Vulcain 2)
+diameter_m = 5.4
+
+[[preset]]
+id = "soyuz_21b_fregat"
+name = "Soyuz-2.1b / Fregat"
+spaceports = ["vostochny", "baikonur"]
+payload_tli_kg = 1800.0               # масса Луны-25 (реально выведенная, а не предельная)
+upper_stage_name = "Fregat (S5.92)"
+upper_stage_dry_mass_kg = 945.0
+upper_stage_propellant_kg = 5307.0
+upper_stage_thrust_n = 19850.0
+upper_stage_isp_s = 333.2
+source = "TLI payload ~1,800 kg: Luna-25 launch (Everyday Astronaut, Soyuz-2.1b/Fregat-M from Vostochny, 2023) - demonstrated mass, not a rated maximum. Upper stage: Wikipedia 'Fregat' (base version: propellant 5,307 kg, empty 945 kg, 19.85 kN, Isp 333.2 s); Luna-25 used Fregat-M, whose empty mass is not published."
+
+[preset.ascent]
+upper_stage_in_ascent = false  # на орбиту выводит третья ступень (блок И); Fregat разгоняет к Луне
+upper_stage_diameter_m = 3.35
+fairing_mass_kg = 1700.0       # ДОПУЩЕНИЕ: обтекатель ST
+vertical_rise_s = 10.0
+stage_coast_s = 3.0
+pitch_kick_deg = 3.0
+source = "Spaceflight101 'Soyuz 2-1B': boosters 4 x (3,784 kg dry, 39,160 kg propellant, RD-107A 838.5/1,021.3 kN SL/vac, Isp 263/320 s, 2.68 m); core (6,545 kg empty, 90,100 kg propellant, RD-108A 792.5/990.2 kN, Isp 258/321 s, 2.95 m); Block I (2,355 kg empty, 25,400 kg propellant, RD-0124 294.3 kN vac, Isp 359 s, 2.66 m). Fairing mass: ASSUMPTION."
+
+[preset.ascent.boosters]
+name = "Block B/V/G/D (RD-107A)"
+count = 4
+dry_mass_kg = 3784.0
+propellant_kg = 39160.0
+thrust_vac_n = 1021300.0
+thrust_sl_n = 838500.0
+isp_vac_s = 320.0
+isp_sl_s = 263.0
+diameter_m = 2.68
+
+[[preset.ascent.stages]]
+name = "Block A core (RD-108A)"
+dry_mass_kg = 6545.0
+propellant_kg = 90100.0
+thrust_vac_n = 990200.0
+thrust_sl_n = 792500.0
+isp_vac_s = 321.0
+isp_sl_s = 258.0
+diameter_m = 2.95
+
+[[preset.ascent.stages]]
+name = "Block I (RD-0124)"
+dry_mass_kg = 2355.0
+propellant_kg = 25400.0
+thrust_vac_n = 294300.0
+isp_vac_s = 359.0
+isp_sl_s = 200.0               # работает только в пустоте
+diameter_m = 2.66

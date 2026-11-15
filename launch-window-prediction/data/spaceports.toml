@@ -1,0 +1,130 @@
+# Космодромы для запуска. Источник координат: файл "Космопорты по миру для запуска ракеты" (проект).
+# Координаты: десятичные градусы, датум WGS84 (предположение: в исходном файле не указан).
+# lat: + север / - юг. lon: + восток / - запад.
+#
+# Ограничения на пуск (необязательные поля, у каждого указан источник в limits_source):
+#   azimuth_min_deg / azimuth_max_deg  - допустимые азимуты пуска (0 = север, 90 = восток);
+#   inclination_min_deg / _max_deg     - допустимый диапазон наклонений орбиты;
+#   allowed_inclinations_deg           - отдельные коридоры наклонений (поля падения ступеней),
+#                                        сравниваются с допуском 1 градус.
+# Если ограничений нет, разрешён любой пуск на восток.
+#
+# ЕЩЁ НЕ ЗАПОЛНЕНО: altitude_m (высота площадки) - нет в исходном файле.
+
+[[spaceport]]
+id = "ksc"
+name = "Kennedy Space Center"
+pads = ["LC-39A", "LC-39B"]
+country = "USA"
+lat_deg = 28.608389
+lon_deg = -80.604333
+azimuth_min_deg = 37.0
+azimuth_max_deg = 112.0
+limits_source = "Eastern Range: 37-112 deg (GlobalSecurity, Eastern Range initiatives); Wikipedia 'Eastern Range' gives 37-114 deg citing 45th Space Wing Launch Site Safety Assessment. Narrower range used."
+
+[[spaceport]]
+id = "ccsfs"
+name = "Cape Canaveral Space Force Station"
+pads = ["SLC-40", "SLC-41"]
+country = "USA"
+lat_deg = 28.562106
+lon_deg = -80.577181
+azimuth_min_deg = 37.0
+azimuth_max_deg = 112.0
+limits_source = "Eastern Range: 37-112 deg (GlobalSecurity, Eastern Range initiatives); Wikipedia 'Eastern Range' gives 37-114 deg citing 45th Space Wing Launch Site Safety Assessment. Narrower range used."
+
+[[spaceport]]
+id = "starbase"
+name = "SpaceX Starbase"
+pads = ["Orbital Launch Pad 1"]
+country = "USA"
+lat_deg = 25.996167
+lon_deg = -97.154444
+inclination_min_deg = 26.0
+inclination_max_deg = 52.0
+limits_source = "Approx. 26-52 deg inclination (orbitalradar.com spaceport page; secondary source, no official FAA azimuth figures found)."
+
+[[spaceport]]
+id = "wenchang"
+name = "Wenchang Space Launch Site"
+pads = ["LC-101"]
+country = "China"
+lat_deg = 19.614167
+lon_deg = 110.950833
+azimuth_min_deg = 90.0
+azimuth_max_deg = 185.0
+limits_source = "Launch range covers 90-185 deg (GlobalSecurity, Wenchang/Hainan launch site page)."
+
+[[spaceport]]
+id = "xichang"
+name = "Xichang Satellite Launch Center"
+pads = ["LC-2"]
+country = "China"
+lat_deg = 28.246111
+lon_deg = 102.026667
+inclination_min_deg = 28.0
+inclination_max_deg = 36.0
+limits_source = "Minimum inclination 28.0 deg, maximum 36.0 deg (Encyclopedia Astronautica, Xichang page)."
+
+[[spaceport]]
+id = "sdsc"
+name = "Satish Dhawan Space Centre"
+pads = ["SLP"]
+country = "India"
+lat_deg = 13.719900
+lon_deg = 80.230400
+inclination_min_deg = 11.0
+inclination_max_deg = 90.0
+limits_source = "11-90 deg inclination from the current pad (NSIL launch opportunity note, stated for SSLV)."
+
+# Танэгасима: открытого источника с допустимыми азимутами или наклонениями не нашлось,
+# ограничения не заданы.
+[[spaceport]]
+id = "tanegashima"
+name = "Tanegashima Space Center"
+pads = ["Yoshinobu Pad 1"]
+country = "Japan"
+lat_deg = 30.400000
+lon_deg = 130.970000
+
+[[spaceport]]
+id = "vostochny"
+name = "Vostochny Cosmodrome"
+pads = ["Site 1S"]
+country = "Russia"
+lat_deg = 51.882778
+lon_deg = 128.332778
+allowed_inclinations_deg = [51.0, 63.0, 72.0, 83.0, 98.0]
+limits_source = "Flight corridors for inclinations 51, 63, 72, 83 and 98 deg selected by Roscosmos (RussianSpaceWeb, Vostochny downrange)."
+
+[[spaceport]]
+id = "baikonur"
+name = "Baikonur Cosmodrome"
+pads = ["Site 31/6"]
+country = "Kazakhstan"
+lat_deg = 45.996111
+lon_deg = 63.563889
+allowed_inclinations_deg = [49.3, 51.3, 51.6, 56.0, 63.0, 64.8, 70.0, 72.7, 98.7]
+limits_source = "Drop-zone inclinations 49.3, 51.3, 51.6, 56, 63, 64.83, 70, 98.7 deg (RussianSpaceWeb, Baikonur downrange, as of 2007); 72.7 deg from Proton performance (AIAA Vehicle Guide)."
+
+[[spaceport]]
+id = "mahia"
+name = "Rocket Lab Launch Complex 1 (Mahia)"
+pads = ["Pad A", "Pad B"]
+country = "New Zealand"
+lat_deg = -39.260850
+lon_deg = 177.865860
+inclination_min_deg = 39.0
+inclination_max_deg = 98.0
+limits_source = "Approx. 39-98 deg inclination (orbitalradar.com spaceport page; secondary source)."
+
+[[spaceport]]
+id = "kourou"
+name = "Guiana Space Centre (Kourou)"
+pads = ["ELA-4"]
+country = "French Guiana"
+lat_deg = 5.262580
+lon_deg = -52.790740
+azimuth_min_deg = -10.5
+azimuth_max_deg = 91.5
+limits_source = "Launch sector over the Atlantic from -10.5 to +91.5 deg azimuth (AIAA Vehicle Guide, Ariane production and launch operations)."

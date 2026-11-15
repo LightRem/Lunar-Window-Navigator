@@ -13,6 +13,7 @@
 # Описания .LBL лежат в репозитории; .IMG скачиваются отдельно (см. README).
 /data/terrain/*.IMG
 /data/terrain/*.img
+/data/terrain/*.part
 
 # Системное и редакторы
 .DS_Store

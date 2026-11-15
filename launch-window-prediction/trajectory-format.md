@@ -66,6 +66,7 @@
 
 | Поле | Тип | Что это |
 |---|---|---|
+| `trajectory` | string | тип траектории перелёта: `"direct_transfer"` (прямой, задача Ламберта) или `"hohmann"` (перелёт Гомана) |
 | `spaceport_id`, `spaceport_name` | string | `"ksc"`, `"Kennedy Space Center"` |
 | `spaceport` | Site | широта, долгота, высота и `body_fixed_km` космодрома (ITRF93, эллипсоид WGS84) |
 | `start` | Endpoint | начальная точка — стартовый стол в момент старта |

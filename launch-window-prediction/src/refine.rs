@@ -36,7 +36,9 @@ use crate::lunar_landing::{
     DescentSim, LandingTarget, MOON_ROTATION_RATE_RAD_S, REASON_LANDING_BOTH, REASON_LANDING_EARTH,
     REASON_LANDING_SUN, REASON_LANDING_WAIT, rotate_about, simulate_descent,
 };
-use crate::propagate::{Dynamics, EarthCentered, Forces, MoonCentered, State, integrate, pos, state, vel};
+use crate::propagate::{
+    Dynamics, EarthCentered, Forces, MoonCentered, State, integrate, pos, state, vel,
+};
 use crate::runlog::{ser_epoch, ser_vec3};
 use crate::sky::{MOON_RADIUS_KM, sky_at};
 use crate::trajectory::{BudgetCheck, DeltaVBudget, Maneuver, TransferSolution};
@@ -298,7 +300,13 @@ fn burn_through(
     } else {
         (anchor.1, 0)
     };
-    let th = Thrusting { base, m: *m, t_s, t_mid: 0.5 * (t_s + t_e), dir: dv.normalize() };
+    let th = Thrusting {
+        base,
+        m: *m,
+        t_s,
+        t_mid: 0.5 * (t_s + t_e),
+        dir: dv.normalize(),
+    };
     let o = integrate(&th, t_s, &y_s, t_e, tol, None, None)?;
     Ok((t_s, t_e, o.y, n1 + o.steps))
 }
@@ -332,7 +340,10 @@ fn match_post_burn_orbit(
         let (e_now, ecc_now) = elements(&r, &v);
         // dE ≈ v·dv: поправка величины; поворот — на угол между направлениями перигея.
         let d_mag = (e_goal - e_now) / v.norm();
-        let (a, b) = (ecc_now - normal * normal.dot(&ecc_now), ecc_goal - normal * normal.dot(&ecc_goal));
+        let (a, b) = (
+            ecc_now - normal * normal.dot(&ecc_now),
+            ecc_goal - normal * normal.dot(&ecc_goal),
+        );
         let angle = a.cross(&b).dot(&normal).atan2(a.dot(&b));
         dv = rotate_about(dv, normal, angle);
         dv += dv.normalize() * d_mag;
@@ -409,21 +420,39 @@ impl Shooter<'_> {
             let (rm, vm) = d.moon(t)?;
             let (r, v) = (pos(y) - rm, vel(y) - vm);
             // Ближайшая к Луне точка; у Земли (до 200 тыс. км) не ищем.
-            Ok(if pos(y).norm() < 200_000.0 { 1.0 } else { -r.dot(&v) / (r.norm() * v.norm()) })
+            Ok(if pos(y).norm() < 200_000.0 {
+                1.0
+            } else {
+                -r.dot(&v) / (r.norm() * v.norm())
+            })
         };
         let (t_start, y_start, burn_steps) = match &self.burn {
             Some((m, anchor)) => {
-                let (_, t_e, y, n) = burn_through(d, *anchor, m, self.t_tli, &(u - self.v_park), self.tol)?;
+                let (_, t_e, y, n) =
+                    burn_through(d, *anchor, m, self.t_tli, &(u - self.v_park), self.tol)?;
                 (t_e, y, n)
             }
             None => (self.t_tli, state(&self.r1, u), 0),
         };
-        let out = integrate(d, t_start, &y_start, self.t_max, self.tol, Some(&mut near_moon), None)?;
+        let out = integrate(
+            d,
+            t_start,
+            &y_start,
+            self.t_max,
+            self.tol,
+            Some(&mut near_moon),
+            None,
+        )?;
         if !out.event {
             return Ok(None);
         }
         let (rm, vm) = d.moon(out.t)?;
-        Ok(Some(Peri { t: out.t, r: pos(&out.y) - rm, v: vel(&out.y) - vm, steps: out.steps + burn_steps }))
+        Ok(Some(Peri {
+            t: out.t,
+            r: pos(&out.y) - rm,
+            v: vel(&out.y) - vm,
+            steps: out.steps + burn_steps,
+        }))
     }
 
     /// Невязки, км:
@@ -467,7 +496,9 @@ impl Shooter<'_> {
         max_iter: u32,
     ) -> Result<std::result::Result<Shot, String>> {
         const MISS: &str = "the integrated trajectory does not reach the Moon";
-        let Some(mut p) = self.fly(&u)? else { return Ok(Err(MISS.into())) };
+        let Some(mut p) = self.fly(&u)? else {
+            return Ok(Err(MISS.into()));
+        };
         let mut steps = p.steps as u64;
         for it in 0..max_iter {
             let f = self.residuals(&p, aim);
@@ -481,21 +512,30 @@ impl Shooter<'_> {
                 .map(|i| {
                     let mut e = Vector3::zeros();
                     e[i] = du;
-                    Ok(self.fly(&(u + e))?.map(|q| (self.residuals(&q, aim), q.steps)))
+                    Ok(self
+                        .fly(&(u + e))?
+                        .map(|q| (self.residuals(&q, aim), q.steps)))
                 })
                 .collect::<Result<_>>()?;
             let mut jac = vec![Vector3::zeros(); f.len()];
             for (i, col) in cols.iter().enumerate() {
-                let Some((fi, n)) = col else { return Ok(Err(MISS.into())) };
+                let Some((fi, n)) = col else {
+                    return Ok(Err(MISS.into()));
+                };
                 steps += *n as u64;
                 for (row, (a, b)) in jac.iter_mut().zip(fi.iter().zip(&f)) {
                     row[i] = (a - b) / du;
                 }
             }
             // Шаг наименьшей нормы: Δu = −Jᵀ (J Jᵀ)⁻¹ f.
-            let gram: Vec<Vec<f64>> = jac.iter().map(|a| jac.iter().map(|b| a.dot(b)).collect()).collect();
+            let gram: Vec<Vec<f64>> = jac
+                .iter()
+                .map(|a| jac.iter().map(|b| a.dot(b)).collect())
+                .collect();
             let Some(lambda) = solve_small(gram, f.clone()) else {
-                return Ok(Err("targeting is degenerate (the landing site lies on the approach line)".into()));
+                return Ok(Err(
+                    "targeting is degenerate (the landing site lies on the approach line)".into(),
+                ));
             };
             let mut step = Vector3::zeros();
             for (row, l) in jac.iter().zip(&lambda) {
@@ -525,8 +565,6 @@ impl Shooter<'_> {
 }
 
 type Shot = (Vector3, Peri, u32, bool, u64);
-
-
 
 /// Первый подбор — с моментом прилёта из поиска. У части перелётов притяжение Луны заметно
 /// ускоряет подлёт, и прежний момент либо недостижим, либо требует лишнего топлива — тогда
@@ -603,7 +641,11 @@ impl LunarPhase<'_> {
 
     /// Полёт от выхода на орбиту (`y0` при t = 0) до остановки над поверхностью.
     /// `t_doi_min` — раньше этого момента сход с орбиты не выполняется.
-    fn run(&self, y0: &State, t_doi_min: f64) -> Result<std::result::Result<LunarOut, &'static str>> {
+    fn run(
+        &self,
+        y0: &State,
+        t_doi_min: f64,
+    ) -> Result<std::result::Result<LunarOut, &'static str>> {
         let d = self.dynamics;
         let site_radius = self.target.site.site.position_km().norm();
         let model = &self.target.descent;
@@ -620,7 +662,13 @@ impl LunarPhase<'_> {
                 .map_err(|err| Error::Almanac(format!("Moon orientation at {e}: {err}")))?
                 * Vector3::new(0.0, 0.0, 1.0)
         };
-        let inclination_deg = pos(y0).cross(&vel(y0)).normalize().dot(&pole).clamp(-1.0, 1.0).acos().to_degrees();
+        let inclination_deg = pos(y0)
+            .cross(&vel(y0))
+            .normalize()
+            .dot(&pole)
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
         let (mut min_alt, mut max_alt) = (f64::INFINITY, f64::NEG_INFINITY);
         let mut track = |_t: f64, y: &State| {
             let alt = pos(y).norm() - MOON_RADIUS_KM;
@@ -637,10 +685,20 @@ impl LunarPhase<'_> {
         let mut doi_event = |t: f64, y: &State| -> Result<f64> {
             Ok((angle_ahead(y, &self.site_dir(t + lead)?) - std::f64::consts::PI - rho).sin())
         };
-        let doi = integrate(d, wait.t, &wait.y, wait.t + 1.6 * period, self.tol, Some(&mut doi_event), Some(&mut track))?;
+        let doi = integrate(
+            d,
+            wait.t,
+            &wait.y,
+            wait.t + 1.6 * period,
+            self.tol,
+            Some(&mut doi_event),
+            Some(&mut track),
+        )?;
         steps += doi.steps as u64;
         if !doi.event {
-            return Err(Error::Config("numerical refinement: no descent opportunity found within one orbit".into()));
+            return Err(Error::Config(
+                "numerical refinement: no descent opportunity found within one orbit".into(),
+            ));
         }
         // Импульс схода: точка схода становится апоцентром эллипса с перицентром на высоте PDI.
         let (r, v) = (pos(&doi.y), vel(&doi.y));
@@ -653,18 +711,37 @@ impl LunarPhase<'_> {
         let (vehicle, _) = model.vehicle();
 
         // Первые 10 минут эллипса — общие для всех итераций подбора момента PDI.
-        let first = integrate(d, doi.t, &state(&r, &v_new), doi.t + 600.0, self.tol, None, None)?;
+        let first = integrate(
+            d,
+            doi.t,
+            &state(&r, &v_new),
+            doi.t + 600.0,
+            self.tol,
+            None,
+            None,
+        )?;
         steps += first.steps as u64;
         let omega = pole * MOON_ROTATION_RATE_RAD_S;
         let mut braking_s = plan.braking_duration_s;
         let mut result = None;
         for _ in 0..8 {
-            let mut pdi_event =
-                |t: f64, y: &State| -> Result<f64> { Ok((angle_ahead(y, &self.site_dir(t + braking_s)?) - rho).sin()) };
-            let pdi = integrate(d, first.t, &first.y, first.t + period, self.tol, Some(&mut pdi_event), None)?;
+            let mut pdi_event = |t: f64, y: &State| -> Result<f64> {
+                Ok((angle_ahead(y, &self.site_dir(t + braking_s)?) - rho).sin())
+            };
+            let pdi = integrate(
+                d,
+                first.t,
+                &first.y,
+                first.t + period,
+                self.tol,
+                Some(&mut pdi_event),
+                None,
+            )?;
             steps += pdi.steps as u64;
             if !pdi.event {
-                return Err(Error::Config("numerical refinement: descent ellipse never reaches the braking point".into()));
+                return Err(Error::Config(
+                    "numerical refinement: descent ellipse never reaches the braking point".into(),
+                ));
             }
             let sim = match simulate_descent(
                 &pos(&pdi.y),
@@ -724,7 +801,10 @@ pub fn refine(
     tli_engine: Option<&Engine>,
 ) -> Result<std::result::Result<Refined, String>> {
     cfg.validate()?;
-    let forces = Forces { earth_j2: cfg.earth_j2, sun: cfg.sun_gravity };
+    let forces = Forces {
+        earth_j2: cfg.earth_j2,
+        sun: cfg.sun_gravity,
+    };
     let (mu_e, mu_m_conic) = (sol.mu_earth_km3_s2, sol.mu_moon_km3_s2);
     let field = GravityField::moon_grail(cfg.lunar_gravity_degree)?;
     let mu_m = field.gm;
@@ -737,7 +817,10 @@ pub fn refine(
     // Опорная орбита: от выведения до разгона.
     // Опорная орбита: от выхода на неё (после подъёма) до разгона.
     let h_park = sol.parking_orbit.plane_normal;
-    let y_ins = state(&sol.ascent.insertion_position_km, &sol.ascent.insertion_velocity_km_s);
+    let y_ins = state(
+        &sol.ascent.insertion_position_km,
+        &sol.ascent.insertion_velocity_km_s,
+    );
     let t_ins = sol.ascent.duration_s;
     let t_tli = (dep.epoch - t0).to_seconds();
     let park = integrate(&earth, t_ins, &y_ins, t_tli, cfg.tolerance, None, None)?;
@@ -836,10 +919,11 @@ pub fn refine(
                 let (mut phi, mut prev): (f64, Option<(f64, f64)>) = (0.0, None);
                 for _ in 0..cfg.max_iterations {
                     let aim = rotate_about(aim0, v_hat, phi);
-                    let (u_new, p, it, ok, n) = match solve_auto(&mut shooter, u, Some(&aim), cfg.max_iterations)? {
-                        Ok(x) => x,
-                        Err(reason) => return Ok(Err(reason)),
-                    };
+                    let (u_new, p, it, ok, n) =
+                        match solve_auto(&mut shooter, u, Some(&aim), cfg.max_iterations)? {
+                            Ok(x) => x,
+                            Err(reason) => return Ok(Err(reason)),
+                        };
                     u = u_new;
                     iterations += it + 1;
                     steps_total += n;
@@ -861,7 +945,8 @@ pub fn refine(
                         spent_m_s: spent_before_descent((u - v_park).norm(), dv_loi),
                     };
                     // Тот же виток, что и по формулам (плюс дополнительные, если условия не выполнились).
-                    let t_doi_min = min_wait.max((conic.doi_epoch - t_peri).to_seconds() - 0.5 * period)
+                    let t_doi_min = min_wait
+                        .max((conic.doi_epoch - t_peri).to_seconds() - 0.5 * period)
                         + extra as f64 * period;
                     let out = match phase.run(&y_llo, t_doi_min)? {
                         Ok(o) => o,
@@ -887,8 +972,11 @@ pub fn refine(
                     phi = next.clamp(phi - 0.2, phi + 0.2);
                 }
                 let (out, t_peri, miss, u_at, p_at, aim_at) = last.expect("at least one iteration");
-                let touchdown = t_peri + (out.t_stop + target.descent.config.terminal_duration_s) * Unit::Second;
-                let vis = target.site.evaluate(&sky_at(almanac, &target.site.site, touchdown)?);
+                let touchdown = t_peri
+                    + (out.t_stop + target.descent.config.terminal_duration_s) * Unit::Second;
+                let vis = target
+                    .site
+                    .evaluate(&sky_at(almanac, &target.site.site, touchdown)?);
                 let sun_ok = !window.require_sun_visible
                     || (vis.sun.visible
                         && vis.sun.elevation_deg >= window.sun_elevation_min_deg
@@ -909,7 +997,10 @@ pub fn refine(
                     pdi_altitude_km: pdi_r - MOON_RADIUS_KM,
                     pdi_height_above_site_km: pdi_r - target.site.site.position_km().norm(),
                     pdi_speed_km_s: vel(&out.pdi).norm(),
-                    braking: DescentSim { samples: Vec::new(), ..out.sim.clone() },
+                    braking: DescentSim {
+                        samples: Vec::new(),
+                        ..out.sim.clone()
+                    },
                     terminal_duration_s: target.descent.config.terminal_duration_s,
                     touchdown_epoch: touchdown,
                     touchdown_shift_s: (touchdown - conic.epoch).to_seconds(),
@@ -939,7 +1030,8 @@ pub fn refine(
                 }
                 extra += 1;
             }
-            let (info, u_kept, p_kept, reached, out_kept, aim_kept) = kept.expect("at least one attempt");
+            let (info, u_kept, p_kept, reached, out_kept, aim_kept) =
+                kept.expect("at least one attempt");
             final_aim = Some(aim_kept);
             u = u_kept;
             converged = reached;
@@ -948,7 +1040,8 @@ pub fn refine(
             lunar_out = Some(out_kept);
         }
         _ => {
-            let (u_new, p, it, ok, n) = match solve_auto(&mut shooter, u, None, cfg.max_iterations)? {
+            let (u_new, p, it, ok, n) = match solve_auto(&mut shooter, u, None, cfg.max_iterations)?
+            {
                 Ok(x) => x,
                 Err(reason) => return Ok(Err(reason)),
             };
@@ -983,7 +1076,10 @@ pub fn refine(
         };
         // Точка опоры — раньше самого раннего возможного начала разгона.
         let t_a = (t_tli - 0.6 * base_model.duration(dv_imp * 1.3)).max(t_ins);
-        let anchor = (t_a, integrate(&earth, t_ins, &y_ins, t_a, cfg.tolerance, None, None)?.y);
+        let anchor = (
+            t_a,
+            integrate(&earth, t_ins, &y_ins, t_a, cfg.tolerance, None, None)?.y,
+        );
         let n_orbit = v_park.norm() / r1.norm();
         shooter.fix_time = true;
         shooter.decided = true;
@@ -997,30 +1093,48 @@ pub fn refine(
         let mut u_guess = u_impulsive;
         let h_approach = p.r.cross(&p.v).normalize();
         let mut coarse_steps = 0u64;
-        let mut solve_at = |k: f64, guess: Option<Vector3>| -> Result<Option<(f64, Vector3, Peri, u64)>> {
-            let model = BurnModel { omega: k * n_orbit, ..base_model };
-            // Без готового приближения — орбита после разгона подгоняется под импульсную.
-            let guess = match guess {
-                Some(g) => g,
-                None => v_park + match_post_burn_orbit(&earth, anchor, &model, t_tli, &r1, &v_park, &(u_impulsive - v_park), cfg.tolerance)?,
+        let mut solve_at =
+            |k: f64, guess: Option<Vector3>| -> Result<Option<(f64, Vector3, Peri, u64)>> {
+                let model = BurnModel {
+                    omega: k * n_orbit,
+                    ..base_model
+                };
+                // Без готового приближения — орбита после разгона подгоняется под импульсную.
+                let guess = match guess {
+                    Some(g) => g,
+                    None => {
+                        v_park
+                            + match_post_burn_orbit(
+                                &earth,
+                                anchor,
+                                &model,
+                                t_tli,
+                                &r1,
+                                &v_park,
+                                &(u_impulsive - v_park),
+                                cfg.tolerance,
+                            )?
+                    }
+                };
+                shooter.burn = Some((model, anchor));
+                // Как и для мгновенного импульса: грубое наведение по картинной плоскости (на ту же
+                // плоскость подлёта), затем точное — с прежним моментом прилёта.
+                shooter.coarse_plane = Some(h_approach);
+                let guess = match shooter.solve(guess, None, cfg.max_iterations) {
+                    Ok(Ok((uc, _, _, _, n))) => {
+                        coarse_steps += n;
+                        uc
+                    }
+                    _ => guess,
+                };
+                shooter.coarse_plane = None;
+                Ok(
+                    match shooter.solve(guess, aim.as_ref(), cfg.max_iterations) {
+                        Ok(Ok((uf, pf, _, true, n))) => Some(((uf - v_park).norm(), uf, pf, n)),
+                        _ => None,
+                    },
+                )
             };
-            shooter.burn = Some((model, anchor));
-            // Как и для мгновенного импульса: грубое наведение по картинной плоскости (на ту же
-            // плоскость подлёта), затем точное — с прежним моментом прилёта.
-            shooter.coarse_plane = Some(h_approach);
-            let guess = match shooter.solve(guess, None, cfg.max_iterations) {
-                Ok(Ok((uc, _, _, _, n))) => {
-                    coarse_steps += n;
-                    uc
-                }
-                _ => guess,
-            };
-            shooter.coarse_plane = None;
-            Ok(match shooter.solve(guess, aim.as_ref(), cfg.max_iterations) {
-                Ok(Ok((uf, pf, _, true, n))) => Some(((uf - v_park).norm(), uf, pf, n)),
-                _ => None,
-            })
-        };
         // Δv почти параболически зависит от скорости поворота: три точки, вершина параболы.
         let mut best: Option<(f64, f64, Vector3, Peri)> = None;
         let mut pts: Vec<(f64, f64)> = Vec::new();
@@ -1058,12 +1172,26 @@ pub fn refine(
         }
         steps_total += coarse_steps;
         let Some(best) = best else {
-            return Ok(Err("targeting with a finite trans-lunar injection burn did not converge".into()));
+            return Ok(Err(
+                "targeting with a finite trans-lunar injection burn did not converge".into(),
+            ));
         };
         let (k, dv_fin, u_fin, _p_fin) = best;
-        let model = BurnModel { omega: k * n_orbit, ..base_model };
-        let (t_s, t_e, y_e, _) = burn_through(&earth, anchor, &model, t_tli, &(u_fin - v_park), cfg.tolerance)?;
-        let max_dv = eng.isp_s * G0 * (eng.mass_kg / (eng.mass_kg - eng.propellant_kg).max(1e-9)).ln() / 1000.0;
+        let model = BurnModel {
+            omega: k * n_orbit,
+            ..base_model
+        };
+        let (t_s, t_e, y_e, _) = burn_through(
+            &earth,
+            anchor,
+            &model,
+            t_tli,
+            &(u_fin - v_park),
+            cfg.tolerance,
+        )?;
+        let max_dv =
+            eng.isp_s * G0 * (eng.mass_kg / (eng.mass_kg - eng.propellant_kg).max(1e-9)).ln()
+                / 1000.0;
         let used = model.propellant(dv_fin);
         tli_burn = Some(TliBurn {
             engine: eng.clone(),
@@ -1111,8 +1239,16 @@ pub fn refine(
         lunar_out.as_ref().zip(landing),
     )?;
     let refined_budget = budget.map(|b| {
-        let tof_limit = sol.budget.as_ref().is_some_and(|c| c.time_of_flight_at_lower_limit);
-        b.check(dv_tli, dv_loi, refined_landing.as_ref().map(|l| l.descent_delta_v_m_s), tof_limit)
+        let tof_limit = sol
+            .budget
+            .as_ref()
+            .is_some_and(|c| c.time_of_flight_at_lower_limit);
+        b.check(
+            dv_tli,
+            dv_loi,
+            refined_landing.as_ref().map(|l| l.descent_delta_v_m_s),
+            tof_limit,
+        )
     });
     Ok(Ok(Refined {
         config: cfg.clone(),
@@ -1195,21 +1331,44 @@ fn record_path(
 ) -> Result<TrajectoryPath> {
     use crate::trajlog::{Bodies, Phase, km};
     const EARTH_ROTATION_RAD_S: f64 = 7.292_115e-5;
-    let bodies = Bodies { almanac, t0: earth.t0 };
+    let bodies = Bodies {
+        almanac,
+        t0: earth.t0,
+    };
     let mut path = TrajectoryPath::default();
     let (ev, sm) = (&mut path.events, &mut path.samples);
 
     // Старт и подъём до опорной орбиты (кинематическая модель, см. AscentInfo).
     let v_ground = (earth.pole * EARTH_ROTATION_RAD_S).cross(&launch.launch_r);
-    ev.push(bodies.event("launch", "launch from the pad", 0.0, &launch.launch_r, &v_ground, None, false)?);
+    ev.push(bodies.event(
+        "launch",
+        "launch from the pad",
+        0.0,
+        &launch.launch_r,
+        &v_ground,
+        None,
+        false,
+    )?);
     match (&launch.ascent.simulation, launch.ascent.to_j2000) {
         (Some(sim), Some(m)) => {
             // Моделирование ракеты: точки каждую секунду и события подъёма.
             for p in &sim.points {
                 sm.push(bodies.sample(Phase::Ascent, p.t_s, &(m * p.r), &(m * p.v), false)?);
             }
-            for e in sim.events.iter().filter(|e| !matches!(e.name, "liftoff" | "insertion")) {
-                ev.push(bodies.event(e.name, e.detail.clone(), e.t_s, &(m * e.r), &(m * e.v), None, false)?);
+            for e in sim
+                .events
+                .iter()
+                .filter(|e| !matches!(e.name, "liftoff" | "insertion"))
+            {
+                ev.push(bodies.event(
+                    e.name,
+                    e.detail.clone(),
+                    e.t_s,
+                    &(m * e.r),
+                    &(m * e.v),
+                    None,
+                    false,
+                )?);
             }
         }
         _ => {
@@ -1219,31 +1378,74 @@ fn record_path(
                 let (r, v) = if i == 0 {
                     (launch.launch_r, v_ground)
                 } else {
-                    launch.ascent.state_at(t, &launch.plane_normal, launch.parking_radius_km)
+                    launch
+                        .ascent
+                        .state_at(t, &launch.plane_normal, launch.parking_radius_km)
                 };
                 sm.push(bodies.sample(Phase::Ascent, t, &r, &v, false)?);
             }
         }
     }
     let y = launch.y_ins;
-    ev.push(bodies.event("parking_insertion", "parking orbit insertion", launch.t_ins, &pos(&y), &vel(&y), None, false)?);
+    ev.push(bodies.event(
+        "parking_insertion",
+        "parking orbit insertion",
+        launch.t_ins,
+        &pos(&y),
+        &vel(&y),
+        None,
+        false,
+    )?);
     // Разгон к Луне: мгновенный импульс или работа двигателя.
     let (t_transfer, y_transfer) = match &launch.burn {
         None => {
-            sampled(earth, launch.t_ins, &y, launch.t_tli, tol, |_, _| Ok(30.0), |t, y| {
-                sm.push(bodies.sample(Phase::ParkingOrbit, t, &pos(y), &vel(y), false)?);
-                Ok(())
-            })?;
-            let r1 = integrate(earth, launch.t_ins, &launch.y_ins, launch.t_tli, tol, None, None).map(|o| pos(&o.y))?;
-            ev.push(bodies.event("tli", "trans-lunar injection burn", launch.t_tli, &r1, &launch.u, Some(launch.u - launch.v_park), false)?);
+            sampled(
+                earth,
+                launch.t_ins,
+                &y,
+                launch.t_tli,
+                tol,
+                |_, _| Ok(30.0),
+                |t, y| {
+                    sm.push(bodies.sample(Phase::ParkingOrbit, t, &pos(y), &vel(y), false)?);
+                    Ok(())
+                },
+            )?;
+            let r1 = integrate(
+                earth,
+                launch.t_ins,
+                &launch.y_ins,
+                launch.t_tli,
+                tol,
+                None,
+                None,
+            )
+            .map(|o| pos(&o.y))?;
+            ev.push(bodies.event(
+                "tli",
+                "trans-lunar injection burn",
+                launch.t_tli,
+                &r1,
+                &launch.u,
+                Some(launch.u - launch.v_park),
+                false,
+            )?);
             (launch.t_tli, state(&r1, &launch.u))
         }
         Some((m, anchor, dv)) => {
             // Опорная орбита до точки опоры, от неё до начала разгона — так же, как при подборе.
-            let y_a = sampled(earth, launch.t_ins, &y, anchor.0, tol, |_, _| Ok(30.0), |t, y| {
-                sm.push(bodies.sample(Phase::ParkingOrbit, t, &pos(y), &vel(y), false)?);
-                Ok(())
-            })?;
+            let y_a = sampled(
+                earth,
+                launch.t_ins,
+                &y,
+                anchor.0,
+                tol,
+                |_, _| Ok(30.0),
+                |t, y| {
+                    sm.push(bodies.sample(Phase::ParkingOrbit, t, &pos(y), &vel(y), false)?);
+                    Ok(())
+                },
+            )?;
             let _ = y_a;
             let (t_s, t_e) = m.window(dv.norm(), launch.t_tli, anchor.0);
             let y_s = if t_s > anchor.0 {
@@ -1255,25 +1457,52 @@ fn record_path(
             };
             ev.push(bodies.event(
                 "tli",
-                format!("trans-lunar injection burn starts (engine burn {:.0} s, delta-v {:.0} m/s)", t_e - t_s, dv.norm() * 1000.0),
+                format!(
+                    "trans-lunar injection burn starts (engine burn {:.0} s, delta-v {:.0} m/s)",
+                    t_e - t_s,
+                    dv.norm() * 1000.0
+                ),
                 t_s,
                 &pos(&y_s),
                 &vel(&y_s),
                 None,
                 false,
             )?);
-            let th = Thrusting { base: earth, m: *m, t_s, t_mid: 0.5 * (t_s + t_e), dir: dv.normalize() };
-            let y_e = sampled(&th, t_s, &y_s, t_e, tol, |_, _| Ok(10.0), |t, y| {
-                sm.push(bodies.sample(Phase::TliBurn, t, &pos(y), &vel(y), false)?);
-                Ok(())
-            })?;
-            ev.push(bodies.event("tli_end", "trans-lunar injection burn ends", t_e, &pos(&y_e), &vel(&y_e), None, false)?);
+            let th = Thrusting {
+                base: earth,
+                m: *m,
+                t_s,
+                t_mid: 0.5 * (t_s + t_e),
+                dir: dv.normalize(),
+            };
+            let y_e = sampled(
+                &th,
+                t_s,
+                &y_s,
+                t_e,
+                tol,
+                |_, _| Ok(10.0),
+                |t, y| {
+                    sm.push(bodies.sample(Phase::TliBurn, t, &pos(y), &vel(y), false)?);
+                    Ok(())
+                },
+            )?;
+            ev.push(bodies.event(
+                "tli_end",
+                "trans-lunar injection burn ends",
+                t_e,
+                &pos(&y_e),
+                &vel(&y_e),
+                None,
+                false,
+            )?);
             (t_e, y_e)
         }
     };
 
     // Перелёт до периселения.
-    let near = |t: f64, y: &State| -> Result<bool> { Ok((pos(y) - earth.moon(t)?.0).norm() < 70_000.0) };
+    let near =
+        |t: f64, y: &State| -> Result<bool> { Ok((pos(y) - earth.moon(t)?.0).norm() < 70_000.0) };
     sampled(
         earth,
         t_transfer,
@@ -1294,7 +1523,15 @@ fn record_path(
     // Выход на окололунную орбиту.
     let mu_m = field.gm;
     let v_circ = p.v.normalize() * (mu_m / p.r.norm()).sqrt();
-    ev.push(bodies.event("loi", "lunar orbit insertion burn (periselene)", p.t, &p.r, &v_circ, Some(v_circ - p.v), true)?);
+    ev.push(bodies.event(
+        "loi",
+        "lunar orbit insertion burn (periselene)",
+        p.t,
+        &p.r,
+        &v_circ,
+        Some(v_circ - p.v),
+        true,
+    )?);
     let t_peri = earth.t0 + p.t * Unit::Second;
     let moon = MoonCentered::new(almanac, t_peri, field, mu_e, forces);
     let y_llo = state(&p.r, &v_circ);
@@ -1306,31 +1543,81 @@ fn record_path(
     let Some((out, target)) = lunar else {
         // Без точки посадки: один виток окололунной орбиты.
         let period = std::f64::consts::TAU * (p.r.norm().powi(3) / mu_m).sqrt();
-        sampled(&moon, 0.0, &y_llo, period, tol, |_, _| Ok(60.0), |t, y| lunar_sample(sm, Phase::LunarOrbit, t, y))?;
+        sampled(
+            &moon,
+            0.0,
+            &y_llo,
+            period,
+            tol,
+            |_, _| Ok(60.0),
+            |t, y| lunar_sample(sm, Phase::LunarOrbit, t, y),
+        )?;
         return Ok(path);
     };
 
     // Ожидание на орбите до схода.
-    sampled(&moon, 0.0, &y_llo, out.t_doi, tol, |_, _| Ok(60.0), |t, y| lunar_sample(sm, Phase::LunarOrbit, t, y))?;
+    sampled(
+        &moon,
+        0.0,
+        &y_llo,
+        out.t_doi,
+        tol,
+        |_, _| Ok(60.0),
+        |t, y| lunar_sample(sm, Phase::LunarOrbit, t, y),
+    )?;
     let (pre, post) = (out.doi_pre, out.doi_post);
-    ev.push(bodies.event("doi", "descent orbit insertion burn", p.t + out.t_doi, &pos(&post), &vel(&post), Some(vel(&post) - vel(&pre)), true)?);
+    ev.push(bodies.event(
+        "doi",
+        "descent orbit insertion burn",
+        p.t + out.t_doi,
+        &pos(&post),
+        &vel(&post),
+        Some(vel(&post) - vel(&pre)),
+        true,
+    )?);
     // Эллипс спуска до начала торможения.
-    sampled(&moon, out.t_doi, &post, out.t_pdi, tol, |_, _| Ok(10.0), |t, y| lunar_sample(sm, Phase::DescentCoast, t, y))?;
+    sampled(
+        &moon,
+        out.t_doi,
+        &post,
+        out.t_pdi,
+        tol,
+        |_, _| Ok(10.0),
+        |t, y| lunar_sample(sm, Phase::DescentCoast, t, y),
+    )?;
     let pdi = out.pdi;
-    ev.push(bodies.event("pdi", "powered descent initiation", p.t + out.t_pdi, &pos(&pdi), &vel(&pdi), None, true)?);
+    ev.push(bodies.event(
+        "pdi",
+        "powered descent initiation",
+        p.t + out.t_pdi,
+        &pos(&pdi),
+        &vel(&pdi),
+        None,
+        true,
+    )?);
     // Торможение.
     for (ts, r, v) in &out.sim.samples {
         lunar_sample(sm, Phase::Braking, out.t_pdi + ts, &state(r, v))?;
     }
     let (t_end, r_end, v_end) = *out.sim.samples.last().expect("braking samples");
-    ev.push(bodies.event("braking_end", "braking stops above the landing site", p.t + out.t_pdi + t_end, &r_end, &v_end, None, true)?);
+    ev.push(bodies.event(
+        "braking_end",
+        "braking stops above the landing site",
+        p.t + out.t_pdi + t_end,
+        &r_end,
+        &v_end,
+        None,
+        true,
+    )?);
     // Заход и вертикальный участок: точка посадки вращается вместе с Луной.
     let site_radius = target.site.site.position_km().norm();
     let site_up = target.site.site.up();
     let t_stop = out.t_pdi + t_end;
     let terminal = target.descent.config.terminal_duration_s;
     let omega_m = |t: f64| -> Result<Vector3> {
-        Ok(bodies.moon_dcm(p.t + t)? * Vector3::new(0.0, 0.0, 1.0) * crate::lunar_landing::MOON_ROTATION_RATE_RAD_S)
+        Ok(bodies.moon_dcm(p.t + t)?
+            * Vector3::new(0.0, 0.0, 1.0)
+            * crate::lunar_landing::MOON_ROTATION_RATE_RAD_S)
     };
     // Заход не моделируется двигателем: точки плавно ведут от остановки после торможения
     // (несколько метров над точкой и в стороне, малая скорость) к месту посадки. Кривая —
@@ -1355,8 +1642,14 @@ fn record_path(
     let tau = tau.max(1.0).min(terminal.max(1.0));
     let site_state = |t: f64| -> Result<State> {
         let s = ((t - t_stop) / tau).clamp(0.0, 1.0);
-        let (h00, h10) = (2.0 * s.powi(3) - 3.0 * s * s + 1.0, s.powi(3) - 2.0 * s * s + s);
-        let (dh00, dh10) = ((6.0 * s * s - 6.0 * s) / tau, (3.0 * s * s - 4.0 * s + 1.0) / tau);
+        let (h00, h10) = (
+            2.0 * s.powi(3) - 3.0 * s * s + 1.0,
+            s.powi(3) - 2.0 * s * s + s,
+        );
+        let (dh00, dh10) = (
+            (6.0 * s * s - 6.0 * s) / tau,
+            (3.0 * s * s - 4.0 * s + 1.0) / tau,
+        );
         let p_body = site_body + d0 * h00 + u0 * (h10 * tau);
         let v_body = d0 * dh00 + u0 * (dh10 * tau);
         let dcm = bodies.moon_dcm(p.t + t)?;
@@ -1370,9 +1663,22 @@ fn record_path(
         t += if t < t_stop + tau { 0.5 } else { 5.0 };
         t = t.min(t_stop + terminal);
     }
-    lunar_sample(sm, Phase::Terminal, t_stop + terminal, &site_state(t_stop + terminal)?)?;
+    lunar_sample(
+        sm,
+        Phase::Terminal,
+        t_stop + terminal,
+        &site_state(t_stop + terminal)?,
+    )?;
     let y_td = site_state(t_stop + terminal)?;
-    ev.push(bodies.event("touchdown", "touchdown at the landing site", p.t + t_stop + terminal, &pos(&y_td), &vel(&y_td), None, true)?);
+    ev.push(bodies.event(
+        "touchdown",
+        "touchdown at the landing site",
+        p.t + t_stop + terminal,
+        &pos(&y_td),
+        &vel(&y_td),
+        None,
+        true,
+    )?);
     Ok(path)
 }
 
@@ -1383,18 +1689,50 @@ mod tests {
     #[test]
     fn config_validation() {
         assert!(NumericalConfig::default().validate().is_ok());
-        assert!(NumericalConfig { lunar_gravity_degree: 61, ..Default::default() }.validate().is_err());
-        assert!(NumericalConfig { tolerance: 1.0, ..Default::default() }.validate().is_err());
-        assert!(NumericalConfig { max_iterations: 0, ..Default::default() }.validate().is_err());
+        assert!(
+            NumericalConfig {
+                lunar_gravity_degree: 61,
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            NumericalConfig {
+                tolerance: 1.0,
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            NumericalConfig {
+                max_iterations: 0,
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
     fn small_linear_solver() {
-        let x = solve_small(vec![vec![2.0, 1.0, 0.0], vec![1.0, 3.0, 1.0], vec![0.0, 1.0, 4.0]], vec![3.0, 5.0, 5.0]).unwrap();
+        let x = solve_small(
+            vec![
+                vec![2.0, 1.0, 0.0],
+                vec![1.0, 3.0, 1.0],
+                vec![0.0, 1.0, 4.0],
+            ],
+            vec![3.0, 5.0, 5.0],
+        )
+        .unwrap();
         for (a, b) in x.iter().zip([1.0, 1.0, 1.0]) {
             assert!((a - b).abs() < 1e-12);
         }
-        assert!(solve_small(vec![vec![1.0, 2.0], vec![2.0, 4.0]], vec![1.0, 2.0]).is_none_or(|x| x.iter().any(|v| !v.is_finite())));
+        assert!(
+            solve_small(vec![vec![1.0, 2.0], vec![2.0, 4.0]], vec![1.0, 2.0])
+                .is_none_or(|x| x.iter().any(|v| !v.is_finite()))
+        );
     }
 
     use crate::ephemeris::{AlmanacSource, load_almanac_blocking};
@@ -1404,9 +1742,13 @@ mod tests {
     use crate::visibility::{SiteVisibility, VisibilityConfig};
 
     fn real() -> (Almanac, SpaceportCatalog) {
-        let almanac = load_almanac_blocking(AlmanacSource::LocalDir("data/kernels".into())).unwrap();
+        let almanac =
+            load_almanac_blocking(AlmanacSource::LocalDir("data/kernels".into())).unwrap();
         let text = std::fs::read_to_string("data/spaceports.toml").unwrap();
-        (almanac, SpaceportCatalog::parse(&text, std::path::Path::new("data/spaceports.toml")).unwrap())
+        (
+            almanac,
+            SpaceportCatalog::parse(&text, std::path::Path::new("data/spaceports.toml")).unwrap(),
+        )
     }
 
     fn target(lat: f64, lon: f64) -> LandingTarget {
@@ -1423,33 +1765,81 @@ mod tests {
         let (almanac, catalog) = real();
         let ksc = catalog.get("ksc").unwrap();
         let day = Epoch::from_gregorian_utc_at_midnight(2026, 12, 10);
-        let rep = DirectTransfer::default().solve(&almanac, ksc, DateConstraint::LaunchDay(day), None, None).unwrap();
+        let rep = DirectTransfer::default()
+            .solve(&almanac, ksc, DateConstraint::LaunchDay(day), None, None)
+            .unwrap();
         let sol = rep.solution.unwrap();
         let cfg = NumericalConfig::default();
-        let r = refine(&almanac, &cfg, &sol, None, None, None).unwrap().unwrap();
+        let r = refine(&almanac, &cfg, &sol, None, None, None)
+            .unwrap()
+            .unwrap();
         assert!(r.converged, "{r:?}");
-        assert!((r.periselene_altitude_km - sol.arrival.lunar_orbit_altitude_km).abs() < 0.05, "{}", r.periselene_altitude_km);
+        assert!(
+            (r.periselene_altitude_km - sol.arrival.lunar_orbit_altitude_km).abs() < 0.05,
+            "{}",
+            r.periselene_altitude_km
+        );
         // Поправки к расчёту по формулам небольшие: десятки м/с.
-        assert!(r.tli_delta_v_change_m_s.abs() < 40.0, "{}", r.tli_delta_v_change_m_s);
-        assert!(r.loi_delta_v_change_m_s.abs() < 120.0, "{}", r.loi_delta_v_change_m_s);
+        assert!(
+            r.tli_delta_v_change_m_s.abs() < 40.0,
+            "{}",
+            r.tli_delta_v_change_m_s
+        );
+        assert!(
+            r.loi_delta_v_change_m_s.abs() < 120.0,
+            "{}",
+            r.loi_delta_v_change_m_s
+        );
         assert!(r.landing.is_none() && r.budget.is_none());
         // Без точки посадки в журнале траектории — до одного витка окололунной орбиты.
         let path = r.path.as_ref().unwrap();
-        assert_eq!(path.events.iter().map(|e| e.name).collect::<Vec<_>>(), ["launch", "parking_insertion", "tli", "loi"]);
-        assert!(path.samples.iter().any(|s| s.phase == crate::trajlog::Phase::LunarOrbit));
+        assert_eq!(
+            path.events.iter().map(|e| e.name).collect::<Vec<_>>(),
+            ["launch", "parking_insertion", "tli", "loi"]
+        );
+        assert!(
+            path.samples
+                .iter()
+                .any(|s| s.phase == crate::trajlog::Phase::LunarOrbit)
+        );
 
         // Независимая проверка: полёт с найденной скоростью после разгона приходит на ту же высоту.
-        let forces = Forces { earth_j2: true, sun: true };
-        let earth = EarthCentered::new(&almanac, sol.departure.epoch, sol.mu_earth_km3_s2, sol.mu_moon_km3_s2, forces).unwrap();
+        let forces = Forces {
+            earth_j2: true,
+            sun: true,
+        };
+        let earth = EarthCentered::new(
+            &almanac,
+            sol.departure.epoch,
+            sol.mu_earth_km3_s2,
+            sol.mu_moon_km3_s2,
+            forces,
+        )
+        .unwrap();
         let t_end = (r.arrival_epoch - sol.departure.epoch).to_seconds();
-        let out = integrate(&earth, 0.0, &state(&r.tli_position_km, &r.tli_velocity_after_km_s), t_end, 1e-11, None, None).unwrap();
+        let out = integrate(
+            &earth,
+            0.0,
+            &state(&r.tli_position_km, &r.tli_velocity_after_km_s),
+            t_end,
+            1e-11,
+            None,
+            None,
+        )
+        .unwrap();
         let moon = earth.moon(t_end).unwrap().0;
         let alt = (pos(&out.y) - moon).norm() - MOON_RADIUS_KM;
         assert!((alt - r.periselene_altitude_km).abs() < 0.5, "{alt}");
 
         // Без сжатия Земли и Солнца ответ другой: силы действительно учитываются.
-        let plain = NumericalConfig { earth_j2: false, sun_gravity: false, ..Default::default() };
-        let r2 = refine(&almanac, &plain, &sol, None, None, None).unwrap().unwrap();
+        let plain = NumericalConfig {
+            earth_j2: false,
+            sun_gravity: false,
+            ..Default::default()
+        };
+        let r2 = refine(&almanac, &plain, &sol, None, None, None)
+            .unwrap()
+            .unwrap();
         assert!(r2.converged);
         assert!((r2.tli_velocity_after_km_s - r.tli_velocity_after_km_s).norm() > 1e-5);
         assert!(r2.parking_position_shift_km < r.parking_position_shift_km);
@@ -1461,20 +1851,38 @@ mod tests {
         let (almanac, catalog) = real();
         let ksc = catalog.get("ksc").unwrap();
         let day = Epoch::from_gregorian_utc_at_midnight(2026, 12, 10);
-        let sol = DirectTransfer::default().solve(&almanac, ksc, DateConstraint::LaunchDay(day), None, None).unwrap().solution.unwrap();
+        let sol = DirectTransfer::default()
+            .solve(&almanac, ksc, DateConstraint::LaunchDay(day), None, None)
+            .unwrap()
+            .solution
+            .unwrap();
         let cfg = NumericalConfig::default();
-        let imp = refine(&almanac, &cfg, &sol, None, None, None).unwrap().unwrap();
+        let imp = refine(&almanac, &cfg, &sol, None, None, None)
+            .unwrap()
+            .unwrap();
         assert!(imp.tli_burn.is_none());
         // Разгонная ступень уровня ICPS с грузом ~11,6 т.
-        let eng = Engine { name: "test stage".into(), thrust_n: 110_100.0, isp_s: 462.0, mass_kg: 44_360.0, propellant_kg: 28_948.0 };
-        let r = refine(&almanac, &cfg, &sol, None, None, Some(&eng)).unwrap().unwrap();
+        let eng = Engine {
+            name: "test stage".into(),
+            thrust_n: 110_100.0,
+            isp_s: 462.0,
+            mass_kg: 44_360.0,
+            propellant_kg: 28_948.0,
+        };
+        let r = refine(&almanac, &cfg, &sol, None, None, Some(&eng))
+            .unwrap()
+            .unwrap();
         let b = r.tli_burn.as_ref().expect("finite burn");
         // Прилёт тот же, что при мгновенном импульсе.
         assert!((r.arrival_epoch - imp.arrival_epoch).to_seconds().abs() < 1.0);
         assert!((r.periselene_altitude_km - imp.periselene_altitude_km).abs() < 0.05);
         assert!((b.impulsive_delta_v_km_s - imp.tli_delta_v_km_s).abs() < 1e-9);
         // Потери положительные и реалистичные для разгона ~15 мин; Δv двигателя = импульс + потери.
-        assert!(b.gravity_loss_m_s > 20.0 && b.gravity_loss_m_s < 200.0, "{}", b.gravity_loss_m_s);
+        assert!(
+            b.gravity_loss_m_s > 20.0 && b.gravity_loss_m_s < 200.0,
+            "{}",
+            b.gravity_loss_m_s
+        );
         assert!((r.tli_delta_v_km_s - b.delta_v_km_s).abs() < 1e-12);
         // Длительность и топливо — по формуле Циолковского; разгон охватывает момент импульса.
         let c = eng.isp_s * G0;
@@ -1486,21 +1894,52 @@ mod tests {
         // Траектория: этап tli_burn между событиями tli и tli_end, без скачков скорости на стыках.
         let path = r.path.as_ref().unwrap();
         let names: Vec<&str> = path.events.iter().map(|e| e.name).collect();
-        assert_eq!(names, ["launch", "parking_insertion", "tli", "tli_end", "loi"]);
+        assert_eq!(
+            names,
+            ["launch", "parking_insertion", "tli", "tli_end", "loi"]
+        );
         use crate::trajlog::Phase;
         let sm = &path.samples;
         assert!(sm.iter().filter(|s| s.phase == Phase::TliBurn).count() > 50);
-        for w in sm.windows(2).filter(|w| w[0].t_s == w[1].t_s && w[0].phase != w[1].phase) {
-            if matches!((w[0].phase, w[1].phase), (Phase::ParkingOrbit, Phase::TliBurn) | (Phase::TliBurn, Phase::Transfer)) {
-                let dv: f64 = (0..3).map(|i| (w[0].v[i] - w[1].v[i]).powi(2)).sum::<f64>().sqrt();
+        for w in sm
+            .windows(2)
+            .filter(|w| w[0].t_s == w[1].t_s && w[0].phase != w[1].phase)
+        {
+            if matches!(
+                (w[0].phase, w[1].phase),
+                (Phase::ParkingOrbit, Phase::TliBurn) | (Phase::TliBurn, Phase::Transfer)
+            ) {
+                let dv: f64 = (0..3)
+                    .map(|i| (w[0].v[i] - w[1].v[i]).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
                 assert!(dv < 1e-5, "jump {dv} at {}", w[0].t_s);
             }
         }
         // Независимая проверка: от конца разгона полёт приходит на ту же высоту.
-        let forces = Forces { earth_j2: true, sun: true };
-        let earth = EarthCentered::new(&almanac, b.end_epoch, sol.mu_earth_km3_s2, sol.mu_moon_km3_s2, forces).unwrap();
+        let forces = Forces {
+            earth_j2: true,
+            sun: true,
+        };
+        let earth = EarthCentered::new(
+            &almanac,
+            b.end_epoch,
+            sol.mu_earth_km3_s2,
+            sol.mu_moon_km3_s2,
+            forces,
+        )
+        .unwrap();
         let t_end = (r.arrival_epoch - b.end_epoch).to_seconds();
-        let out = integrate(&earth, 0.0, &state(&b.end_position_km, &b.end_velocity_km_s), t_end, 1e-11, None, None).unwrap();
+        let out = integrate(
+            &earth,
+            0.0,
+            &state(&b.end_position_km, &b.end_velocity_km_s),
+            t_end,
+            1e-11,
+            None,
+            None,
+        )
+        .unwrap();
         let alt = (pos(&out.y) - earth.moon(t_end).unwrap().0).norm() - MOON_RADIUS_KM;
         assert!((alt - r.periselene_altitude_km).abs() < 0.5, "{alt}");
     }
@@ -1513,7 +1952,9 @@ mod tests {
         let (almanac, catalog) = real();
         let ksc = catalog.get("ksc").unwrap();
         let lib = LaunchVehicleLibrary::presets_only().unwrap();
-        let rk = lib.resolve("sls_block1", &LaunchVehicleParams::default()).unwrap();
+        let rk = lib
+            .resolve("sls_block1", &LaunchVehicleParams::default())
+            .unwrap();
         let setup = AscentSetup {
             rocket_id: "sls_block1".into(),
             rocket_name: rk.config.name.clone(),
@@ -1521,10 +1962,19 @@ mod tests {
             upper: rk.config.upper_stage(),
             payload_kg: 16103.0,
         };
-        let dt = DirectTransfer::default().with_ascent([("ksc".to_string(), setup)].into_iter().collect());
+        let dt = DirectTransfer::default()
+            .with_ascent([("ksc".to_string(), setup)].into_iter().collect());
         let day = Epoch::from_gregorian_utc_at_midnight(2027, 1, 1);
         let t = target(5.0, -10.0);
-        let rep = dt.solve(&almanac, ksc, DateConstraint::ArrivalDay(day), None, Some(&t)).unwrap();
+        let rep = dt
+            .solve(
+                &almanac,
+                ksc,
+                DateConstraint::ArrivalDay(day),
+                None,
+                Some(&t),
+            )
+            .unwrap();
         let sol = rep.solution.expect("solution");
         let a = &sol.ascent;
         assert_eq!(a.model, "simulation");
@@ -1533,21 +1983,51 @@ mod tests {
         // Точка выхода на орбиту в J2000 — на высоте орбиты, в плоскости опорной орбиты.
         let h = sol.parking_orbit.plane_normal;
         assert!((a.insertion_position_km.norm() - sol.parking_orbit.radius_km).abs() < 2.0);
-        assert!(a.insertion_position_km.normalize().dot(&h).abs() < 2e-3, "{}", a.insertion_position_km.normalize().dot(&h));
+        assert!(
+            a.insertion_position_km.normalize().dot(&h).abs() < 2e-3,
+            "{}",
+            a.insertion_position_km.normalize().dot(&h)
+        );
         assert!(a.insertion_velocity_km_s.normalize().dot(&h).abs() < 2e-3);
         assert!(sol.departure.coast_s.to_seconds() > a.duration_s);
-        let r = refine(&almanac, &NumericalConfig::default(), &sol, Some(&t), None, None).unwrap().unwrap();
+        let r = refine(
+            &almanac,
+            &NumericalConfig::default(),
+            &sol,
+            Some(&t),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
         assert!(r.converged && r.landing.as_ref().unwrap().miss_km < 0.1);
         let path = r.path.unwrap();
         // В журнале траектории — точки подъёма из моделирования и события ступеней.
         let names: Vec<_> = path.events.iter().map(|e| e.name).collect();
-        assert!(names.contains(&"booster_separation") && names.contains(&"max_q"), "{names:?}");
-        assert!(path.events.windows(2).all(|w| w[0].t_s <= w[1].t_s), "{names:?}");
-        let asc: Vec<_> = path.samples.iter().filter(|s| s.phase == crate::trajlog::Phase::Ascent).collect();
+        assert!(
+            names.contains(&"booster_separation") && names.contains(&"max_q"),
+            "{names:?}"
+        );
+        assert!(
+            path.events.windows(2).all(|w| w[0].t_s <= w[1].t_s),
+            "{names:?}"
+        );
+        let asc: Vec<_> = path
+            .samples
+            .iter()
+            .filter(|s| s.phase == crate::trajlog::Phase::Ascent)
+            .collect();
         assert!(asc.len() > 400);
-        let first_park = path.samples.iter().find(|s| s.phase == crate::trajlog::Phase::ParkingOrbit).unwrap();
+        let first_park = path
+            .samples
+            .iter()
+            .find(|s| s.phase == crate::trajlog::Phase::ParkingOrbit)
+            .unwrap();
         let last = asc.last().unwrap();
-        let d: f64 = (0..3).map(|i| (first_park.r[i] - last.r[i]).powi(2)).sum::<f64>().sqrt();
+        let d: f64 = (0..3)
+            .map(|i| (first_park.r[i] - last.r[i]).powi(2))
+            .sum::<f64>()
+            .sqrt();
         assert!(d < 0.01, "ascent/parking joint {d} km");
     }
 
@@ -1559,26 +2039,74 @@ mod tests {
         let day = Epoch::from_gregorian_utc_at_midnight(2027, 1, 1);
         for (lat, lon) in [(5.0, -10.0), (0.0, -30.0)] {
             let t = target(lat, lon);
-            let rep = DirectTransfer::default().solve(&almanac, ksc, DateConstraint::ArrivalDay(day), None, Some(&t)).unwrap();
+            let rep = DirectTransfer::default()
+                .solve(
+                    &almanac,
+                    ksc,
+                    DateConstraint::ArrivalDay(day),
+                    None,
+                    Some(&t),
+                )
+                .unwrap();
             let sol = rep.solution.unwrap();
             let conic = sol.landing.unwrap();
-            let r = refine(&almanac, &NumericalConfig::default(), &sol, Some(&t), None, None).unwrap().unwrap();
+            let r = refine(
+                &almanac,
+                &NumericalConfig::default(),
+                &sol,
+                Some(&t),
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap();
             let l = r.landing.clone().expect("refined landing");
             assert!(r.converged, "{lat} {lon}: {r:?}");
             assert!(l.miss_km < 0.1, "miss {}", l.miss_km);
             assert!(l.conditions_met, "{:?}", l.unmet_reason);
-            assert!(r.tli_delta_v_change_m_s.abs() < 40.0, "{}", r.tli_delta_v_change_m_s);
+            assert!(
+                r.tli_delta_v_change_m_s.abs() < 40.0,
+                "{}",
+                r.tli_delta_v_change_m_s
+            );
             // Порядок событий и разумные величины.
-            assert!(r.arrival_epoch < l.doi_epoch && l.doi_epoch < l.pdi_epoch && l.pdi_epoch < l.touchdown_epoch);
-            assert!((l.pdi_altitude_km - 15.0).abs() < 4.0, "pdi {}", l.pdi_altitude_km);
+            assert!(
+                r.arrival_epoch < l.doi_epoch
+                    && l.doi_epoch < l.pdi_epoch
+                    && l.pdi_epoch < l.touchdown_epoch
+            );
+            assert!(
+                (l.pdi_altitude_km - 15.0).abs() < 4.0,
+                "pdi {}",
+                l.pdi_altitude_km
+            );
             assert!(l.orbit_min_altitude_km > 90.0 && l.orbit_max_altitude_km < 110.0);
-            assert!(l.orbit_max_altitude_km - l.orbit_min_altitude_km > 0.3, "mascons change the altitude");
+            assert!(
+                l.orbit_max_altitude_km - l.orbit_min_altitude_km > 0.3,
+                "mascons change the altitude"
+            );
             assert!((l.doi_delta_v_m_s - conic.descent.doi_delta_v_m_s).abs() < 3.0);
             // Журнал траектории: события по порядку, этапы непрерывны, касание — в точке посадки.
             let path = r.path.as_ref().expect("trajectory path");
             let names: Vec<_> = path.events.iter().map(|e| e.name).collect();
-            assert_eq!(names, ["launch", "parking_insertion", "tli", "loi", "doi", "pdi", "braking_end", "touchdown"]);
-            assert!(path.samples.first().is_some_and(|s| s.phase == crate::trajlog::Phase::Ascent));
+            assert_eq!(
+                names,
+                [
+                    "launch",
+                    "parking_insertion",
+                    "tli",
+                    "loi",
+                    "doi",
+                    "pdi",
+                    "braking_end",
+                    "touchdown"
+                ]
+            );
+            assert!(
+                path.samples
+                    .first()
+                    .is_some_and(|s| s.phase == crate::trajlog::Phase::Ascent)
+            );
             assert!((path.events[1].t_s - sol.ascent.duration_s).abs() < 1e-6);
             assert!(path.events.windows(2).all(|w| w[0].t_s <= w[1].t_s));
             assert!(path.samples.windows(2).all(|w| w[0].t_s <= w[1].t_s));
@@ -1588,16 +2116,33 @@ mod tests {
             assert!(((rm[0] * rm[0] + rm[1] * rm[1] + rm[2] * rm[2]).sqrt() - site).abs() < 0.01);
             let loi = &path.events[3];
             let dv = loi.delta_v.unwrap();
-            assert!(((dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]).sqrt() - r.loi_delta_v_km_s).abs() < 1e-5);
-            assert!((l.braking.delta_v_m_s - conic.descent.powered_descent_delta_v_m_s).abs() < 40.0);
+            assert!(
+                ((dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]).sqrt() - r.loi_delta_v_km_s).abs()
+                    < 1e-5
+            );
+            assert!(
+                (l.braking.delta_v_m_s - conic.descent.powered_descent_delta_v_m_s).abs() < 40.0
+            );
             // Касание — в пределах нескольких часов от расчёта по формулам.
-            assert!(l.touchdown_shift_s.abs() < 4.0 * 3600.0, "{}", l.touchdown_shift_s);
+            assert!(
+                l.touchdown_shift_s.abs() < 4.0 * 3600.0,
+                "{}",
+                l.touchdown_shift_s
+            );
 
             // Без масконов высота орбиты почти не меняется, а момент касания другой.
-            let smooth = NumericalConfig { lunar_gravity_degree: 0, ..Default::default() };
-            let r0 = refine(&almanac, &smooth, &sol, Some(&t), None, None).unwrap().unwrap();
+            let smooth = NumericalConfig {
+                lunar_gravity_degree: 0,
+                ..Default::default()
+            };
+            let r0 = refine(&almanac, &smooth, &sol, Some(&t), None, None)
+                .unwrap()
+                .unwrap();
             let l0 = r0.landing.unwrap();
-            assert!(l0.orbit_max_altitude_km - l0.orbit_min_altitude_km < l.orbit_max_altitude_km - l.orbit_min_altitude_km);
+            assert!(
+                l0.orbit_max_altitude_km - l0.orbit_min_altitude_km
+                    < l.orbit_max_altitude_km - l.orbit_min_altitude_km
+            );
             assert!((l0.touchdown_epoch - l.touchdown_epoch).to_seconds().abs() > 0.1);
         }
     }

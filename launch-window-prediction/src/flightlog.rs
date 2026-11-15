@@ -402,6 +402,7 @@ pub fn summary(reports: &[TransferReport], spacecraft: Option<&str>, rocket: Opt
     let Some(s) = &best.solution else {
         return json!({
             "status": "no flight found",
+            "trajectory": best.trajectory,
             "reason": best.no_solution_reason,
             "spaceports_searched": alternatives,
         });
@@ -419,6 +420,7 @@ pub fn summary(reports: &[TransferReport], spacecraft: Option<&str>, rocket: Opt
     let site = best.landing_site.map(|l| lat_lon_text(l.lat_deg, l.lon_deg));
     json!({
         "status": if touchdown.is_some() { "flight and landing found" } else { "flight found" },
+        "trajectory": s.trajectory,
         "values_from": if refined.is_some() { "numerical refinement" } else { "formulas (patched conics)" },
         "not_refined_because": s.refine_failure.as_deref().or(s.refine_skipped.as_deref()),
         "spaceport": format!("{} ({})", best.spaceport.name, best.spaceport.id),
@@ -462,6 +464,7 @@ pub fn summary(reports: &[TransferReport], spacecraft: Option<&str>, rocket: Opt
             })),
         },
         "moon_distance_at_arrival_km": s.arrival.moon_distance_km,
+        "hohmann": s.hohmann,
         "variants_checked_by_refinement": (!best.refine_attempts.is_empty()).then_some(&best.refine_attempts),
         "spaceports_compared": alternatives,
     })

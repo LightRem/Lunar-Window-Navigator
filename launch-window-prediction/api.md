@@ -61,6 +61,7 @@ launch-window-prediction api [--jobs-dir DIR] [--pretty] <команда> [ар�
 ```json
 {
   "arrival_date": "2027-02-14",
+  "trajectory": "hohmann",
   "spaceport": "baikonur",
   "rocket": "soyuz_21b_fregat",
   "landing_site": { "lat_deg": -89.0, "lon_deg": 45.0 }
@@ -71,6 +72,7 @@ launch-window-prediction api [--jobs-dir DIR] [--pretty] <команда> [ар�
 |---|---|---|
 | `launch_date` | `"ГГГГ-ММ-ДД"` | сутки старта (UTC): найти лучший старт в эти сутки |
 | `arrival_date` | `"ГГГГ-ММ-ДД"` | сутки прилёта (UTC); с `landing_site` — **сутки посадки** в точку. Только одно из двух полей дат |
+| `trajectory` | строка | тип траектории: `"direct"` (по умолчанию; прямой перелёт, задача Ламберта) или `"hohmann"` (перелёт Гомана: разгон по касательной, апогей у Луны, 180°) |
 | `spaceport` | строка | id космодрома (см. `catalog`); без него — все подходящие |
 | `rocket` | строка | id ракеты |
 | `rocket_overrides` | объект | переопределения параметров ракеты, `{ "payload_tli_kg": 9000 }` |
@@ -145,10 +147,12 @@ launch-window-prediction api [--jobs-dir DIR] [--pretty] <команда> [ар�
 
 ### Что внутри `summary`
 
-- `summary` — итог коротко: `status`, космодром, ракета, аппарат, `launch_utc`,
+- `summary` — итог коротко: `status`, `trajectory` (`"direct_transfer"` или `"hohmann"`), космодром, ракета, аппарат, `launch_utc`,
   `lunar_orbit_insertion_utc`, `touchdown_utc`, `timeline` (все этапы с UTC и временем от
   старта), `durations`, `delta_v` (включая `tli_burn`: начало и конец разгона, потери, топливо),
-  `spaceports_compared`, `variants_checked_by_refinement`.
+  `spaceports_compared`, `variants_checked_by_refinement`; для перелёта Гомана — `hohmann`
+  (номинальное время полёта, расхождение времени и допуск, полуось, перигей и апогей, промах
+  апогея относительно расстояния до Луны, скорости в перигее и апогее).
 - `launch_site` — космодром: координаты, положение WGS84, ограничения трасс; старт: время UTC
   и местное, Солнце над космодромом, азимут, подъём ракеты, опорная орбита, точка отрыва.
 - `landing_site` — точка посадки: сторона Луны, проверка рельефа (уклоны, вердикт), высота и

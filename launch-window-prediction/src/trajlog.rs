@@ -361,6 +361,8 @@ pub fn endpoints(r: &TransferReport) -> (Option<Endpoint>, Option<Endpoint>) {
 
 #[derive(Serialize)]
 struct Entry<'a> {
+    /// Тип траектории перелёта: "direct_transfer" или "hohmann".
+    trajectory: &'static str,
     spaceport_id: &'a str,
     spaceport_name: &'a str,
     spaceport: Site,
@@ -447,6 +449,7 @@ pub fn write(
         let p = &r.spaceport;
         let alt_km = p.altitude_m.unwrap_or(0.0) / 1000.0;
         entries.push(Entry {
+            trajectory: s.trajectory,
             spaceport_id: &p.id,
             spaceport_name: &p.name,
             spaceport: Site {

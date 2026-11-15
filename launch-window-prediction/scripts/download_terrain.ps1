@@ -12,9 +12,12 @@
 param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$Maps = @('all'),
-    [string]$Dir = (Join-Path (Split-Path -Parent $PSScriptRoot) 'data\terrain')
+    [string]$Dir = ''
 )
 $ErrorActionPreference = 'Stop'
+if (-not $Dir) {
+    $Dir = Join-Path (Split-Path -Parent $PSScriptRoot) 'data\terrain'
+}
 
 $PDS = 'https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr'
 $MIT = 'https://imbrium.mit.edu/DATA/LOLA_GDR'

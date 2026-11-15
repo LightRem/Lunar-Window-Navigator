@@ -56,7 +56,7 @@ target/release/launch-window-prediction --kernels-dir data/kernels --terrain-dir
 | `data/kernels/` | ядра эфемерид: `de440s.bsp`, `moon_pa_de440_200625.bpc`, `moon_fk_de440.epa`, `earth_latest_high_prec.bpc`, `pck11.pca` (~51 МБ) | да |
 | `data/gravity/` | поле тяготения Луны GRAIL GL0660B до степени 60 | да |
 | `data/terrain/` | карты высот LOLA: описания `.LBL` | да |
-| `data/terrain/*.IMG` | сами карты высот (115–530 МБ каждая) | **нет**, скачать отдельно |
+| `data/terrain/*.IMG` | сами карты высот (115–530 МБ каждая) | **нет**, скачиваются скриптом |
 | `data/*.toml` | космодромы, ракеты, аппараты, параметры перелёта, посадки, видимости | да |
 
 Ориентация Земли `earth_latest_high_prec.bpc` (ITRF93) покрывает даты примерно до февраля 2027.
@@ -66,18 +66,34 @@ target/release/launch-window-prediction --kernels-dir data/kernels --terrain-dir
 ### Карты рельефа LOLA
 
 Без карт программа работает, но не проверяет площадку и считает горизонт ровным.
-Для проверки рельефа положите файлы `.IMG` в `data/terrain/` рядом с одноимёнными `.LBL`:
+Карты скачивает скрипт — в `data/terrain/`, рядом с одноимёнными `.LBL`:
 
-| Файл | Покрытие | Размер |
-|---|---|---|
-| `LDEM_64.IMG` | вся Луна, 64 пикс./град (~474 м) | 531 МБ |
-| `LDEM_80S_80M.IMG` | южная полярная область от 80° ю. ш., 80 м | 116 МБ |
-| `LDEM_80N_80M.IMG` | северная полярная область от 80° с. ш., 80 м | 116 МБ |
-| `LDEM_875S_10M.IMG` | окрестность Южного полюса от 87,5° ю. ш., 10 м | 460 МБ |
+```powershell
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -File scripts\download_terrain.ps1               # все карты, ~1,2 ГБ
+powershell -ExecutionPolicy Bypass -File scripts\download_terrain.ps1 global south  # только выбранные
+```
 
-Источник: набор данных `LRO-L-LOLA-4-GDR-V1.0` (LRO LOLA Gridded Data Records), узел NASA PDS Geosciences,
-https://pds-geosciences.wustl.edu/ — раздел LRO / LOLA, папки `lola_gdr/cylindrical/img` и `lola_gdr/polar/img`.
-Можно положить только нужные карты: программа берёт самую подробную из тех, что покрывают точку.
+```bash
+# Linux / macOS
+scripts/download_terrain.sh                 # все карты
+scripts/download_terrain.sh global south    # только выбранные
+```
+
+| Ключ | Файл | Покрытие | Размер |
+|---|---|---|---|
+| `global` | `LDEM_64.IMG` | вся Луна, 64 пикс./град (~474 м) | 531 МБ |
+| `south` | `LDEM_80S_80M.IMG` | южная полярная область от 80° ю. ш., 80 м | 116 МБ |
+| `north` | `LDEM_80N_80M.IMG` | северная полярная область от 80° с. ш., 80 м | 116 МБ |
+| `south10m` | `LDEM_875S_10M.IMG` | окрестность Южного полюса от 87,5° ю. ш., 10 м | 460 МБ |
+
+Скрипт проверяет каждую карту по размеру и SHA-256, уже скачанные пропускает, прерванную загрузку продолжает,
+а если основной сервер недоступен, берёт карту с зеркала MIT. Нужен `curl` (в Windows 10 и новее уже есть).
+Можно скачать только нужные карты: программа берёт самую подробную из тех, что покрывают точку.
+
+Источник: набор данных `LRO-L-LOLA-4-GDR-V1.0` (LRO LOLA Gridded Data Records), узел NASA PDS Geosciences
+(https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/), зеркало
+https://imbrium.mit.edu/DATA/LOLA_GDR/.
 
 ## Результаты
 
@@ -125,6 +141,7 @@ src/
   ephemeris.rs       загрузка ядер ANISE
   flightlog.rs, runlog.rs, trajlog.rs   журналы JSON
 data/                исходные данные и настройки (см. выше)
+scripts/             скачивание карт рельефа LOLA
 tests/               интеграционные тесты и замер времени
 ```
 

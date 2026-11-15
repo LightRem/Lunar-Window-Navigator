@@ -204,6 +204,15 @@ pub struct Request {
     pub arrival_date: Option<String>,
     /// Тип траектории: "direct" (по умолчанию) или "hohmann".
     pub trajectory: Option<String>,
+    /// Режим полёта: "fast" (по умолчанию, как раньше) или "economy" (наименьший расход топлива,
+    /// поиск в пределах ±N суток от даты).
+    pub mode: Option<String>,
+    /// Рассчитать окно старта вместо быстрого/экономного режима. Только с `arrival_date`
+    /// (сутки посадки); с `launch_date` и `mode` не сочетается.
+    #[serde(default)]
+    pub launch_window: bool,
+    /// Запас окна старта над наименьшим Δv миссии, м/с (по умолчанию `[launch_window] margin_m_s`).
+    pub launch_window_margin_m_s: Option<f64>,
     /// Космодром (id из каталога). Без него — все космодромы (или космодромы ракеты).
     pub spaceport: Option<String>,
     /// Ракета-носитель (id из каталога).
@@ -280,6 +289,9 @@ impl Request {
         if let Some(k) = &self.trajectory {
             push("--trajectory", k.clone());
         }
+        if let Some(m) = &self.mode {
+            push("--mode", m.clone());
+        }
         if let Some(p) = &self.spaceport {
             push("--spaceport", p.clone());
         }
@@ -337,6 +349,13 @@ impl Request {
                 push(flag, v.clone());
             }
         }
+        if self.launch_window {
+            a.push("--launch-window".into());
+        }
+        if let Some(m) = self.launch_window_margin_m_s {
+            a.push("--window-margin".into());
+            a.push(m.to_string());
+        }
         if self.no_cache {
             a.push("--no-cache".into());
         }
@@ -350,6 +369,20 @@ impl Request {
         }
         for d in [&self.launch_date, &self.arrival_date].into_iter().flatten() {
             parse_date(d).map_err(|e| ApiError::bad(e.to_string()))?;
+        }
+        if self.launch_window {
+            if self.launch_date.is_some() {
+                return Err(ApiError::bad("launch_window is searched only for a landing day: give arrival_date, not launch_date"));
+            }
+            if self.arrival_date.is_none() {
+                return Err(ApiError::bad("launch_window needs arrival_date (the landing day)"));
+            }
+            if self.mode.is_some() {
+                return Err(ApiError::bad("launch_window replaces mode: give one of them"));
+            }
+        }
+        if self.launch_window_margin_m_s.is_some() && !self.launch_window {
+            return Err(ApiError::bad("launch_window_margin_m_s needs \"launch_window\": true"));
         }
         if let Some(s) = &self.landing_site {
             if !(-90.0..=90.0).contains(&s.lat_deg) || !(-180.0..=360.0).contains(&s.lon_deg) {
@@ -760,6 +793,8 @@ fn help() -> Value {
         "request_fields": {
             "launch_date | arrival_date": "UTC day YYYY-MM-DD (one of them); with landing_site, arrival_date is the landing day",
             "trajectory": "transfer trajectory: \"direct\" (default; Lambert arc at any angle) or \"hohmann\" (tangential burn at perigee, apogee at the Moon, 180 deg)",
+            "mode": "flight mode: \"fast\" (default; best variant on the requested day) or \"economy\" (least total mission delta-v TLI + LOI + descent, wider limits, nearby days within [economy] date_shift_days of transfer.toml; the summary gets an \"economy\" block)",
+            "launch_window, launch_window_margin_m_s": "true: find the launch window instead of the fast/economy variant — every launch time that lands on arrival_date (the landing day; launch_date is not allowed) with total mission delta-v within the margin (m/s, default [launch_window] margin_m_s) of the least; the summary gets a \"launch_window\" block with opens/closes and intervals",
             "spaceport": "spaceport id (see catalog); omit to search all",
             "rocket, rocket_overrides": "rocket id and {field: value} overrides",
             "spacecraft, spacecraft_overrides": "spacecraft id and {field: value} overrides",

@@ -20,8 +20,25 @@ pub struct LambertSolution {
     pub transfer_angle_rad: f64,
 }
 
+/// Нижняя граница поиска z (её значения Штумпфа считаются один раз).
+const Z_LO: f64 = -100.0;
+/// Верхняя граница: у 4π² функции Штумпфа вырождаются (1 - cos √z теряет точность), поэтому чуть ниже.
+const Z_MAX: f64 = 4.0 * std::f64::consts::PI * std::f64::consts::PI * (1.0 - 1e-4);
+/// C и S на границах поиска: они нужны в каждой задаче, а значения те же.
+static BOUNDS: std::sync::LazyLock<[(f64, f64); 2]> = std::sync::LazyLock::new(|| [stumpff_calc(Z_LO), stumpff_calc(Z_MAX)]);
+
 /// Функции Штумпфа C(z) и S(z).
 fn stumpff(z: f64) -> (f64, f64) {
+    if z == Z_LO {
+        BOUNDS[0]
+    } else if z == Z_MAX {
+        BOUNDS[1]
+    } else {
+        stumpff_calc(z)
+    }
+}
+
+fn stumpff_calc(z: f64) -> (f64, f64) {
     if z.abs() < 1e-3 {
         // Ряды Тейлора: без потери точности около нуля.
         let c = 0.5 - z / 24.0 + z * z / 720.0 - z * z * z / 40_320.0;
@@ -41,6 +58,17 @@ fn stumpff(z: f64) -> (f64, f64) {
 /// - `r1`, `r2` — положения, км; `tof_s` — время перелёта, с; `mu` — гравитационный параметр, км³/с²;
 /// - `normal` — нормаль плоскости, задающая направление движения (не обязательно единичная).
 pub fn solve(r1: &Vector3, r2: &Vector3, tof_s: f64, mu: f64, normal: &Vector3) -> Result<LambertSolution> {
+    solve_from(r1, r2, tof_s, mu, normal, START_Z).map(|(sol, _)| sol)
+}
+
+/// Начальное приближение z по умолчанию: чуть выше 0 (почти параболическая орбита, типичная
+/// для перелёта к Луне).
+pub const START_Z: f64 = 0.5;
+
+/// Как [`solve`], но метод Ньютона начинается с `z0` (например, с решения соседней задачи — тогда
+/// нужно меньше шагов); возвращает и найденное z. Корень тот же: он ищется до 1e-12 внутри того же
+/// интервала со сменой знака.
+pub fn solve_from(r1: &Vector3, r2: &Vector3, tof_s: f64, mu: f64, normal: &Vector3, z0: f64) -> Result<(LambertSolution, f64)> {
     let (n1, n2) = (r1.norm(), r2.norm());
     if !(n1 > 0.0 && n2 > 0.0 && tof_s > 0.0 && mu > 0.0) {
         return Err(Error::Config("lambert: invalid input".into()));
@@ -71,9 +99,8 @@ pub fn solve(r1: &Vector3, r2: &Vector3, tof_s: f64, mu: f64, normal: &Vector3) 
         (y / c).powf(1.5) * s + a * y.sqrt() - sqrt_mu * tof_s
     };
 
-    // У 4π² функции Штумпфа вырождаются (1 - cos √z теряет точность), поэтому граница чуть ниже.
-    let z_max = 4.0 * std::f64::consts::PI * std::f64::consts::PI * (1.0 - 1e-4);
-    let mut lo = -100.0;
+    let z_max = Z_MAX;
+    let mut lo = Z_LO;
     let mut tries = 0;
     while f_of(lo) > 0.0 {
         lo *= 2.0;
@@ -105,7 +132,7 @@ pub fn solve(r1: &Vector3, r2: &Vector3, tof_s: f64, mu: f64, normal: &Vector3) 
     // Метод Ньютона внутри интервала [lo, hi], где F меняет знак; шаг вне интервала
     // (или без производной) заменяется делением пополам. Сходится за 5-10 шагов вместо ~45.
     // Начало — чуть выше z = 0 (почти параболическая орбита, типичная для перелёта к Луне).
-    let mut z = 0.5f64.clamp(lo, hi);
+    let mut z = if z0.is_finite() { z0 } else { START_Z }.clamp(lo, hi);
     for _ in 0..200 {
         let (fz, dfz) = f_df(z);
         if fz < 0.0 {
@@ -113,7 +140,10 @@ pub fn solve(r1: &Vector3, r2: &Vector3, tof_s: f64, mu: f64, normal: &Vector3) 
         } else {
             hi = z;
         }
-        let newton = dfz.map(|d| z - fz / d).filter(|zn| *zn > lo && *zn < hi);
+        // Шаг Ньютона внутри интервала. Шаг, округлившийся до нуля (z уже корень с точностью до
+        // последнего бита), попадает ровно на границу — он тоже принимается и завершает поиск.
+        // Раньше такой шаг отвергался, и поиск уходил делением пополам на 30-40 лишних шагов.
+        let newton = dfz.map(|d| z - fz / d).filter(|zn| *zn >= lo && *zn <= hi);
         let next = newton.unwrap_or(0.5 * (lo + hi));
         let done = (next - z).abs() < 1e-12 * (1.0 + z.abs()) || hi - lo < 1e-12 * (1.0 + hi.abs());
         z = next;
@@ -128,11 +158,14 @@ pub fn solve(r1: &Vector3, r2: &Vector3, tof_s: f64, mu: f64, normal: &Vector3) 
     let f = 1.0 - y / n1;
     let g = a * (y / mu).sqrt();
     let gdot = 1.0 - y / n2;
-    Ok(LambertSolution {
-        v1: (r2 - r1 * f) / g,
-        v2: (r2 * gdot - r1) / g,
-        transfer_angle_rad: dth,
-    })
+    Ok((
+        LambertSolution {
+            v1: (r2 - r1 * f) / g,
+            v2: (r2 * gdot - r1) / g,
+            transfer_angle_rad: dth,
+        },
+        z,
+    ))
 }
 
 #[cfg(test)]
@@ -205,5 +238,33 @@ mod tests {
         let r2 = Vector3::new(-9000.0, 0.0, 0.0);
         assert!(solve(&r1, &r2, 3600.0, MU_EARTH, &Z).is_err());
         assert!(solve(&r1, &r2, -1.0, MU_EARTH, &Z).is_err());
+    }
+}
+
+#[cfg(test)]
+mod warm_start_tests {
+    use super::*;
+
+    /// Начало с решения соседней задачи даёт тот же ответ, что и холодный старт, — в том числе
+    /// когда угол перелёта проходит через 180° и z меняется скачком.
+    #[test]
+    fn warm_start_reaches_the_same_root() {
+        let mu = 398_600.441_8;
+        let r2 = Vector3::new(-380_000.0, 60_000.0, 20_000.0);
+        let n = Vector3::new(0.0, 0.05, 1.0);
+        let mut z = START_Z;
+        for k in 10..90 {
+            let ang = k as f64 * 120.0 * 0.001_13;
+            let r1 = Vector3::new(ang.cos(), ang.sin(), 0.0) * 6563.0;
+            let tof = 110.0 * 3600.0 - k as f64 * 120.0;
+            let (Ok((warm, zw)), Ok((cold, zc))) =
+                (solve_from(&r1, &r2, tof, mu, &n, z), solve_from(&r1, &r2, tof, mu, &n, START_Z))
+            else {
+                continue;
+            };
+            assert!((zw - zc).abs() <= 1e-11 * (1.0 + zc.abs()), "k={k}: {zw} vs {zc}");
+            assert!((warm.v1 - cold.v1).norm() < 1e-9, "k={k}");
+            z = zw;
+        }
     }
 }

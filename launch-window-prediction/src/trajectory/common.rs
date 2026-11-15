@@ -20,11 +20,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AscentInfo, ArrivalInfo, DateConstraint, DeltaVBudget, DepartureInfo, HohmannInfo, InclinationChoice,
-    LaunchInfo, Maneuver, Objective, ParkingOrbit, REASON_BUDGET, ScanPoint, SearchStats, Trajectory, TransferReport,
+    FlightMode, LaunchInfo, LaunchWindow, LaunchWindowConfig, Maneuver, Objective, ParkingOrbit, REASON_BUDGET, ScanPoint, SearchStats, Trajectory, TransferReport,
     TransferSolution,
 };
 use crate::error::{Error, Result};
-use crate::lunar_landing::{LandingInfo, LandingTarget, find_landing};
+use crate::lunar_landing::{LandingCache, LandingInfo, LandingTarget, find_landing};
 use crate::spaceport::Spaceport;
 
 /// Гравитационные параметры по умолчанию, км³/с² (если в ядрах их нет).
@@ -289,7 +289,25 @@ pub struct Transfer<M: LegModel> {
     ascent_cache: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(String, i64), AscentSlot>>>,
     /// Папка кэша узлов подъёма на диске (между запусками); `None` — без кэша.
     ascent_cache_dir: Option<std::path::PathBuf>,
+    /// Режим полёта.
+    mode: FlightMode,
+    /// Экономный режим: сколько градусов наклонения сверх наименьшего перебирать.
+    inclination_span_deg: f64,
+    /// Параметры окна старта (для режима [`FlightMode::LaunchWindow`]).
+    launch_window: LaunchWindowConfig,
+    /// Экономный режим: варианты по моменту прилёта, общие для соседних суток (см. [`EvalKey`]).
+    eval_cache: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<EvalKey, EvalSlot>>>,
+    /// Экономный режим: витки посадки по прилётам, общие для соседних суток.
+    landing_cache: std::sync::Arc<LandingCache>,
 }
+
+/// Ключ общего расчёта вариантов для момента прилёта: всё, от чего он зависит. Соседние сутки
+/// в экономном режиме просматривают одни и те же моменты прилёта (окна поиска перекрываются), а
+/// варианты по моменту прилёта от суток не зависят — зависит только окно пуска (оно входит в
+/// ключ) и земная система координат (она выбирается на весь промежуток трека космодрома).
+type EvalKey = (String, Epoch, Duration, Duration, Epoch, Epoch, &'static str);
+type EvalOut = std::result::Result<Vec<Candidate>, &'static str>;
+type EvalSlot = std::sync::Arc<std::sync::OnceLock<std::result::Result<EvalOut, String>>>;
 
 /// Ракета и груз для моделирования подъёма.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -326,7 +344,18 @@ impl<M: LegModel> Transfer<M> {
     pub fn new(config: TransferCommonConfig, model: M) -> Result<Self> {
         config.validate()?;
         model.validate(&config)?;
-        Ok(Self { config, model, ascent: Default::default(), ascent_cache: Default::default(), ascent_cache_dir: None })
+        Ok(Self {
+            config,
+            model,
+            ascent: Default::default(),
+            ascent_cache: Default::default(),
+            ascent_cache_dir: None,
+            mode: FlightMode::Fast,
+            inclination_span_deg: 0.0,
+            launch_window: LaunchWindowConfig::default(),
+            eval_cache: Default::default(),
+            landing_cache: Default::default(),
+        })
     }
 
     /// Параметры поиска для отчёта: общие и свои.
@@ -416,6 +445,26 @@ impl<M: LegModel> Transfer<M> {
         self
     }
 
+    /// Режим полёта. В экономном режиме для каждого момента прилёта перебираются наклонения
+    /// опорной орбиты от наименьшего до наименьшего + `inclination_span_deg` и берётся самый
+    /// экономичный вариант (в быстром — первое наклонение, при котором вариант есть).
+    pub fn with_mode(mut self, mode: FlightMode, inclination_span_deg: f64) -> Self {
+        self.mode = mode;
+        self.inclination_span_deg = inclination_span_deg.max(0.0);
+        self
+    }
+
+    /// Параметры окна старта: используются, если режим — [`FlightMode::LaunchWindow`].
+    pub fn with_launch_window(mut self, cfg: LaunchWindowConfig) -> Self {
+        self.launch_window = cfg;
+        self
+    }
+
+    /// Режим полёта.
+    pub fn mode(&self) -> FlightMode {
+        self.mode
+    }
+
     fn ascent_input<'a>(&self, setup: &'a AscentSetup, port: &Spaceport, azimuth_deg: f64, mu: f64) -> crate::ascent::AscentInput<'a> {
         crate::ascent::AscentInput {
             vehicle: &setup.vehicle,
@@ -440,13 +489,18 @@ impl<M: LegModel> Transfer<M> {
                 .entry((port.id.clone(), k))
                 .or_default()
                 .clone();
-            let v = slot.get_or_init(|| {
-                let az = k as f64 * ASCENT_AZIMUTH_STEP_DEG;
-                crate::ascent::simulate(&self.ascent_input(setup, port, az, mu))
-                    .map(|r| r.map(|r| (r.duration_s, r.downrange_angle_rad)))
-                    .map_err(|e| e.to_string())
-            });
-            v.clone().map_err(Error::Config)
+            if let Some(v) = slot.get() {
+                return v.clone().map_err(Error::Config);
+            }
+            // Считается вне блокировки: моделирование подъёма само параллельное, и поток, ждущий
+            // его, может взять из очереди rayon задачу, которой нужна эта же ячейка, — под
+            // `get_or_init` с расчётом внутри это взаимная блокировка. Результат детерминирован,
+            // поэтому если два потока посчитают одно и то же, сохранится первый (тот же).
+            let az = k as f64 * ASCENT_AZIMUTH_STEP_DEG;
+            let v = crate::ascent::simulate(&self.ascent_input(setup, port, az, mu))
+                .map(|r| r.map(|r| (r.duration_s, r.downrange_angle_rad)))
+                .map_err(|e| e.to_string());
+            slot.get_or_init(|| v).clone().map_err(Error::Config)
         };
         let x = azimuth_deg / ASCENT_AZIMUTH_STEP_DEG;
         let (k0, k1) = (x.floor() as i64, x.floor() as i64 + 1);
@@ -590,6 +644,11 @@ impl Candidate {
         self.dv_tli + self.dv_loi
     }
 
+    /// Суммарный Δv миссии: разгон + торможение у Луны + спуск (если считается посадка), км/с.
+    fn mission_km_s(&self) -> f64 {
+        self.total() + self.landing.map_or(0.0, |l| l.descent.total_delta_v_m_s / 1000.0)
+    }
+
     fn leg(&self) -> Leg {
         Leg {
             coast_s: (self.tli - self.launch).to_seconds(),
@@ -703,8 +762,71 @@ impl<M: LegModel> Search<'_, M> {
         t_a: Epoch,
         coast_step: Duration,
         arrival_step: Duration,
-        (launch_lo, launch_hi): (Epoch, Epoch),
+        launch: (Epoch, Epoch),
     ) -> Result<std::result::Result<Candidate, &'static str>> {
+        let economy = self.transfer.mode == FlightMode::Economy;
+        let evaluated = if economy {
+            self.evaluate_shared(t_a, coast_step, arrival_step, launch)?
+        } else {
+            self.evaluate_arrival(t_a, coast_step, arrival_step, launch)?
+        };
+        let cands = match evaluated {
+            Ok(c) => c,
+            Err(reason) => return Ok(Err(reason)),
+        };
+        let r_llo = MOON_RADIUS_KM + self.cfg.lunar_orbit_altitude_km;
+        if !economy {
+            // Быстрый режим: вариант первого наклонения, при котором он есть.
+            return Ok(self
+                .with_landing(cands[0], r_llo)?
+                .inspect_err(|_| Counters::add(&self.counters.arrivals_rejected_landing, 1)));
+        }
+        // Экономный режим: самый экономичный вариант, для которого есть посадка в точку.
+        let mut landing_reason: Option<&'static str> = None;
+        for b in cands {
+            match self.with_landing(b, r_llo)? {
+                Ok(c) => return Ok(Ok(c)),
+                Err(reason) => landing_reason = landing_reason.or(Some(reason)),
+            }
+        }
+        Counters::add(&self.counters.arrivals_rejected_landing, 1);
+        Ok(Err(landing_reason.unwrap_or(REASON_WINDOW)))
+    }
+
+    /// [`Self::evaluate_arrival`] с общим кэшем (для экономного режима): варианты момента прилёта
+    /// считаются один раз, даже если их запросили разные сутки или разные потоки одновременно.
+    fn evaluate_shared(
+        &self,
+        t_a: Epoch,
+        coast_step: Duration,
+        arrival_step: Duration,
+        (launch_lo, launch_hi): (Epoch, Epoch),
+    ) -> Result<EvalOut> {
+        let (tof_min_s, tof_max_s) = self.transfer.model.time_of_flight_bounds_s(self.cfg);
+        let w_lo = (t_a - tof_max_s * Unit::Second - self.cfg.coast_max_min * Unit::Minute).max(launch_lo);
+        let w_hi = (t_a - tof_min_s * Unit::Second - self.cfg.coast_min_min * Unit::Minute).min(launch_hi);
+        let key: EvalKey = (self.port.id.clone(), t_a, coast_step, arrival_step, w_lo, w_hi, self.site.frame_name);
+        let slot = self.transfer.eval_cache.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_default().clone();
+        if let Some(v) = slot.get() {
+            return v.clone().map_err(Error::Config);
+        }
+        // Вне блокировки (см. `ascent_lookup`): внутри может идти параллельный расчёт подъёма, а
+        // ожидание под `get_or_init` при работе rayon ведёт к взаимной блокировке. Одинаковый
+        // результат, посчитанный дважды, сохраняется один раз.
+        let v = self.evaluate_arrival(t_a, coast_step, arrival_step, (launch_lo, launch_hi)).map_err(|e| e.to_string());
+        slot.get_or_init(|| v).clone().map_err(Error::Config)
+    }
+
+    /// Варианты разгона для прилёта в момент `t_a` без посадки: лучший вариант каждого наклонения
+    /// (быстрый режим — только первого, при котором он есть), по возрастанию Δv; либо причина,
+    /// почему вариантов нет.
+    fn evaluate_arrival(
+        &self,
+        t_a: Epoch,
+        coast_step: Duration,
+        arrival_step: Duration,
+        (launch_lo, launch_hi): (Epoch, Epoch),
+    ) -> Result<EvalOut> {
         let cfg = self.cfg;
         let model = &self.transfer.model;
         Counters::add(&self.counters.arrival_epochs, 1);
@@ -749,10 +871,16 @@ impl<M: LegModel> Search<'_, M> {
         let mut rejected_by_tli = false;
         let mut rejected_by_timing = false;
         let objective = self.objective();
+        // Экономный режим: перебираются несколько наклонений, варианты сравниваются по Δv.
+        let economy = self.transfer.mode == FlightMode::Economy;
+        let mut economy_best: Vec<Candidate> = Vec::new();
 
         // Наклонения по возрастанию: берём наименьшее, при котором есть хоть один вариант
         // (меньшее наклонение — пуск ближе к востоку, больше выигрыш от вращения Земли).
         for &incl_deg in &inclinations {
+            if economy && incl_deg > inclinations[0] + self.transfer.inclination_span_deg + 1e-9 {
+                break;
+            }
             Counters::add(&self.counters.inclinations_tried, 1);
             let incl = incl_deg.to_radians();
             let mut best: Option<Candidate> = None;
@@ -867,38 +995,17 @@ impl<M: LegModel> Search<'_, M> {
                     rejected_by_timing |= legc.rejected_timing > 0;
                 }
             }
-            if let Some(mut b) = best {
-                if let Some(target) = self.landing {
-                    // Δv, израсходованный аппаратом до спуска, — для его массы в начале торможения.
-                    let prior_m_s: f64 = self.budget.map_or(0.0, |bg| {
-                        bg.maneuvers
-                            .iter()
-                            .map(|m| match m {
-                                Maneuver::Tli => b.dv_tli * 1000.0,
-                                Maneuver::Loi => b.dv_loi * 1000.0,
-                                Maneuver::Descent => 0.0,
-                            })
-                            .sum()
-                    });
-                    match find_landing(
-                        self.almanac,
-                        target,
-                        b.arrival,
-                        b.v2 - b.v_moon,
-                        self.mu_m,
-                        r_llo,
-                        prior_m_s,
-                        self.landing_day,
-                    )? {
-                        Ok(info) => b.landing = Some(info),
-                        Err(reason) => {
-                            Counters::add(&self.counters.arrivals_rejected_landing, 1);
-                            return Ok(Err(reason));
-                        }
-                    }
-                }
-                return Ok(Ok(b));
+            if economy {
+                economy_best.extend(best);
+                continue;
             }
+            if let Some(b) = best {
+                return Ok(Ok(vec![b]));
+            }
+        }
+        if economy && !economy_best.is_empty() {
+            economy_best.sort_by(|a, b| a.total().total_cmp(&b.total()));
+            return Ok(Ok(economy_best));
         }
         Ok(Err(if rejected_by_budget {
             REASON_BUDGET
@@ -913,6 +1020,36 @@ impl<M: LegModel> Search<'_, M> {
         } else {
             "no launch opportunity within the coast and flight-time limits"
         }))
+    }
+
+    /// Посадка в точку для варианта (если точка задана): вариант с данными посадки или причина,
+    /// почему сесть нельзя.
+    fn with_landing(&self, mut b: Candidate, r_llo: f64) -> Result<std::result::Result<Candidate, &'static str>> {
+        let Some(target) = self.landing else { return Ok(Ok(b)) };
+        // Δv, израсходованный аппаратом до спуска, — для его массы в начале торможения.
+        let prior_m_s: f64 = self.budget.map_or(0.0, |bg| {
+            bg.maneuvers
+                .iter()
+                .map(|m| match m {
+                    Maneuver::Tli => b.dv_tli * 1000.0,
+                    Maneuver::Loi => b.dv_loi * 1000.0,
+                    Maneuver::Descent => 0.0,
+                })
+                .sum()
+        });
+        let (v_inf, day) = (b.v2 - b.v_moon, self.landing_day);
+        let found = if self.transfer.mode == FlightMode::Economy {
+            self.transfer.landing_cache.find(self.almanac, target, b.arrival, v_inf, self.mu_m, r_llo, prior_m_s, day)?
+        } else {
+            find_landing(self.almanac, target, b.arrival, v_inf, self.mu_m, r_llo, prior_m_s, day)?
+        };
+        match found {
+            Ok(info) => {
+                b.landing = Some(info);
+                Ok(Ok(b))
+            }
+            Err(reason) => Ok(Err(reason)),
+        }
     }
 
     /// Доводка варианта для моделей с жёсткой связью времён (Гоман): момент прилёта
@@ -973,6 +1110,7 @@ impl<M: LegModel> Search<'_, M> {
                     delta_v_tli_km_s: Some(c.dv_tli),
                     delta_v_loi_km_s: Some(c.dv_loi),
                     delta_v_total_km_s: Some(c.total()),
+                    delta_v_mission_km_s: Some(c.mission_km_s()),
                     landing: c.landing.map(|l| l.epoch),
                 },
                 Err(reason) => ScanPoint {
@@ -987,6 +1125,7 @@ impl<M: LegModel> Search<'_, M> {
                     delta_v_tli_km_s: None,
                     delta_v_loi_km_s: None,
                     delta_v_total_km_s: None,
+                    delta_v_mission_km_s: None,
                     landing: None,
                 },
             })
@@ -1148,6 +1287,7 @@ impl<M: LegModel> Search<'_, M> {
                 chosen_deg: c.incl.to_degrees(),
             },
             delta_v_total_km_s: c.total(),
+            delta_v_mission_km_s: c.mission_km_s(),
             hohmann: c.hohmann,
             mu_earth_km3_s2: self.mu_e,
             mu_moon_km3_s2: self.mu_m,
@@ -1250,11 +1390,18 @@ impl<M: LegModel> Trajectory for Transfer<M> {
             None => (None, Vec::new()),
         };
         self.save_ascent_cache(spaceport, search.mu_e, ascent_loaded);
+        let launch_window = (self.mode == FlightMode::LaunchWindow).then(|| {
+            let all: Vec<ScanPoint> = coarse_scan.iter().chain(&fine_scan).cloned().collect();
+            LaunchWindow::from_scan(constraint, &all, &self.launch_window)
+        }).flatten();
 
         Ok(TransferReport {
             trajectory: self.name(),
+            mode: self.mode,
             spaceport: spaceport.clone(),
             constraint,
+            economy: None,
+            launch_window,
             config: self.config_json(),
             launch_window_start: launch_lo,
             launch_window_end: launch_hi,

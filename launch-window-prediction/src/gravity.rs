@@ -27,6 +27,28 @@ pub struct GravityField {
     /// Ненормированные коэффициенты, индекс `n(n+1)/2 + m`.
     c: Vec<f64>,
     s: Vec<f64>,
+    /// Множители рекурсии Каннингема `(2n-1)/(n-m)` и `(n+m-1)/(n-m)` (индекс `n(n+1)/2 + m`,
+    /// до степени `degree + 1`): считаются один раз, а не при каждом вызове.
+    rec_a: Vec<f64>,
+    rec_b: Vec<f64>,
+}
+
+/// Множители рекурсии до степени `nmax` включительно.
+fn recursion_tables(nmax: usize) -> (Vec<f64>, Vec<f64>) {
+    let size = idx(nmax, nmax) + 1;
+    let (mut a, mut b) = (vec![0.0; size], vec![0.0; size]);
+    for m in 0..=nmax {
+        for n in (m + 1)..=nmax {
+            a[idx(n, m)] = (2 * n - 1) as f64 / (n - m) as f64;
+            b[idx(n, m)] = (n + m - 1) as f64 / (n - m) as f64;
+        }
+    }
+    (a, b)
+}
+
+thread_local! {
+    /// Рабочие массивы V и W (без выделения памяти на каждый вызов).
+    static SCRATCH: std::cell::RefCell<(Vec<f64>, Vec<f64>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
 fn idx(n: usize, m: usize) -> usize {
@@ -36,7 +58,8 @@ fn idx(n: usize, m: usize) -> usize {
 impl GravityField {
     /// Точечная масса (без неоднородностей).
     pub fn point_mass(gm: f64, radius_km: f64) -> Self {
-        Self { gm, radius_km, degree: 0, c: vec![1.0], s: vec![0.0] }
+        let (rec_a, rec_b) = recursion_tables(1);
+        Self { gm, radius_km, degree: 0, c: vec![1.0], s: vec![0.0], rec_a, rec_b }
     }
 
     /// Поле Луны GRAIL GL0660B до степени `degree` (0 — точечная масса с тем же GM).
@@ -88,7 +111,8 @@ impl GravityField {
         if degree > max_seen {
             return Err(bad(format!("degree {degree} requested, the table has only {max_seen}")));
         }
-        Ok(Self { gm, radius_km, degree, c, s })
+        let (rec_a, rec_b) = recursion_tables(degree + 1);
+        Ok(Self { gm, radius_km, degree, c, s, rec_a, rec_b })
     }
 
     /// Ненормированный J2 = −C20.
@@ -96,32 +120,59 @@ impl GravityField {
         if self.degree >= 2 { -self.c[idx(2, 0)] } else { 0.0 }
     }
 
-    /// V и W Каннингема до степени `nmax` в точке `r` (в осях поля).
-    fn vw(&self, r: &Vector3, nmax: usize) -> (Vec<f64>, Vec<f64>) {
-        let size = idx(nmax, nmax) + 1;
-        let (mut v, mut w) = (vec![0.0; size], vec![0.0; size]);
+    /// Вызывает `f` с V и W Каннингема до степени `nmax` (не больше `degree + 1`) в точке `r`
+    /// (в осях поля). Массивы — рабочие массивы потока: каждый элемент до `nmax` перезаписывается.
+    fn with_vw<T>(&self, r: &Vector3, nmax: usize, f: impl FnOnce(&[f64], &[f64]) -> T) -> T {
+        SCRATCH.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let (v, w) = &mut *guard;
+            let size = idx(nmax, nmax) + 1;
+            if v.len() < size {
+                v.resize(size, 0.0);
+                w.resize(size, 0.0);
+            }
+            self.vw_into(r, nmax, &mut v[..size], &mut w[..size]);
+            f(&v[..size], &w[..size])
+        })
+    }
+
+    /// Рекурсия по строкам (степень n — подряд в памяти): каждый V(n,m), W(n,m) считается по той
+    /// же формуле из тех же значений, что и в рекурсии по столбцам (Montenbruck & Gill 3.2.4).
+    fn vw_into(&self, r: &Vector3, nmax: usize, v: &mut [f64], w: &mut [f64]) {
+        let (ta, tb) = (&self.rec_a, &self.rec_b);
         let r2 = r.norm_squared();
         let rr = self.radius_km;
         let (x, y, z) = (r.x * rr / r2, r.y * rr / r2, r.z * rr / r2);
         let q = rr * rr / r2;
         v[0] = rr / r2.sqrt();
-        for m in 0..=nmax {
-            if m > 0 {
-                let f = (2 * m - 1) as f64;
-                let (vp, wp) = (v[idx(m - 1, m - 1)], w[idx(m - 1, m - 1)]);
-                v[idx(m, m)] = f * (x * vp - y * wp);
-                w[idx(m, m)] = f * (x * wp + y * vp);
+        w[0] = 0.0;
+        for n in 1..=nmax {
+            let (p0, p1) = (idx(n, 0), idx(n - 1, 0));
+            let (vh, vc) = v.split_at_mut(p0);
+            let (wh, wc) = w.split_at_mut(p0);
+            let (vc, wc) = (&mut vc[..=n], &mut wc[..=n]);
+            let (v1, w1) = (&vh[p1..p0], &wh[p1..p0]);
+            let (ar, br) = (&ta[p0..p0 + n], &tb[p0..p0 + n]);
+            if n >= 2 {
+                let p2 = idx(n - 2, 0);
+                let (v2, w2) = (&vh[p2..p1], &wh[p2..p1]);
+                for m in 0..n - 1 {
+                    let (a, b) = (ar[m], br[m]);
+                    vc[m] = a * z * v1[m] - b * q * v2[m];
+                    wc[m] = a * z * w1[m] - b * q * w2[m];
+                }
             }
-            for n in (m + 1)..=nmax {
-                let a = (2 * n - 1) as f64 / (n - m) as f64;
-                let b = (n + m - 1) as f64 / (n - m) as f64;
-                let (v1, w1) = (v[idx(n - 1, m)], w[idx(n - 1, m)]);
-                let (v2, w2) = if n >= m + 2 { (v[idx(n - 2, m)], w[idx(n - 2, m)]) } else { (0.0, 0.0) };
-                v[idx(n, m)] = a * z * v1 - b * q * v2;
-                w[idx(n, m)] = a * z * w1 - b * q * w2;
-            }
+            let m = n - 1;
+            let (a, b) = (ar[m], br[m]);
+            let (v2, w2) = (0.0, 0.0);
+            vc[m] = a * z * v1[m] - b * q * v2;
+            wc[m] = a * z * w1[m] - b * q * w2;
+            // Диагональ: из (n-1, n-1).
+            let f = (2 * n - 1) as f64;
+            let (vp, wp) = (v1[n - 1], w1[n - 1]);
+            vc[n] = f * (x * vp - y * wp);
+            wc[n] = f * (x * wp + y * vp);
         }
-        (v, w)
     }
 
     /// Степень, выше которой вклад членов на расстоянии `r_km` ниже точности f64.
@@ -137,11 +188,13 @@ impl GravityField {
 
     /// Потенциал, км²/с² (положительный).
     pub fn potential(&self, r: &Vector3) -> f64 {
-        let (v, w) = self.vw(r, self.degree);
-        let mut u = 0.0;
-        for i in 0..self.c.len() {
-            u += self.c[i] * v[i] + self.s[i] * w[i];
-        }
+        let u = self.with_vw(r, self.degree, |v, w| {
+            let mut u = 0.0;
+            for i in 0..self.c.len() {
+                u += self.c[i] * v[i] + self.s[i] * w[i];
+            }
+            u
+        });
         u * self.gm / self.radius_km
     }
 
@@ -154,35 +207,89 @@ impl GravityField {
         // члена (ниже точности f64), не считаются. Результат тот же, но в 5-30 раз быстрее
         // на подлёте; у поверхности считается полная степень.
         let nmax = self.effective_degree(r.norm());
-        let (v, w) = self.vw(r, nmax + 1);
+        let (ax, ay, az) = self.with_vw(r, nmax + 1, |v, w| self.sum_acceleration(v, w, nmax));
+        Vector3::new(ax, ay, az) * (self.gm / (self.radius_km * self.radius_km))
+    }
+
+    fn sum_acceleration(&self, v: &[f64], w: &[f64], nmax: usize) -> (f64, f64, f64) {
         let (mut ax, mut ay, mut az) = (0.0, 0.0, 0.0);
         for n in 0..=nmax {
+            let (pc, pv) = (idx(n, 0), idx(n + 1, 0));
+            let (cr, sr) = (&self.c[pc..=pc + n], &self.s[pc..=pc + n]);
+            let (vr, wr) = (&v[pv..=pv + n + 1], &w[pv..=pv + n + 1]);
             for m in 0..=n {
-                let (c, s) = (self.c[idx(n, m)], self.s[idx(n, m)]);
+                let (c, s) = (cr[m], sr[m]);
                 if c == 0.0 && s == 0.0 {
                     continue;
                 }
-                let up = idx(n + 1, m + 1);
-                let mid = idx(n + 1, m);
+                let (vu, wu, vm, wm) = (vr[m + 1], wr[m + 1], vr[m], wr[m]);
                 if m == 0 {
-                    ax -= c * v[up];
-                    ay -= c * w[up];
+                    ax -= c * vu;
+                    ay -= c * wu;
                 } else {
-                    let dn = idx(n + 1, m - 1);
+                    let (vd, wd) = (vr[m - 1], wr[m - 1]);
                     let f = ((n - m + 1) * (n - m + 2)) as f64;
-                    ax += 0.5 * (-c * v[up] - s * w[up] + f * (c * v[dn] + s * w[dn]));
-                    ay += 0.5 * (-c * w[up] + s * v[up] + f * (-c * w[dn] + s * v[dn]));
+                    ax += 0.5 * (-c * vu - s * wu + f * (c * vd + s * wd));
+                    ay += 0.5 * (-c * wu + s * vu + f * (-c * wd + s * vd));
                 }
-                az += (n - m + 1) as f64 * (-c * v[mid] - s * w[mid]);
+                az += (n - m + 1) as f64 * (-c * vm - s * wm);
             }
         }
-        Vector3::new(ax, ay, az) * (self.gm / (self.radius_km * self.radius_km))
+        (ax, ay, az)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Прежняя рекурсия по столбцам (эталон для рекурсии по строкам).
+    fn vw_by_columns(f: &GravityField, r: &Vector3, nmax: usize) -> (Vec<f64>, Vec<f64>) {
+        let size = idx(nmax, nmax) + 1;
+        let (mut v, mut w) = (vec![0.0; size], vec![0.0; size]);
+        let r2 = r.norm_squared();
+        let rr = f.radius_km;
+        let (x, y, z) = (r.x * rr / r2, r.y * rr / r2, r.z * rr / r2);
+        let q = rr * rr / r2;
+        v[0] = rr / r2.sqrt();
+        for m in 0..=nmax {
+            if m > 0 {
+                let k = (2 * m - 1) as f64;
+                let (vp, wp) = (v[idx(m - 1, m - 1)], w[idx(m - 1, m - 1)]);
+                v[idx(m, m)] = k * (x * vp - y * wp);
+                w[idx(m, m)] = k * (x * wp + y * vp);
+            }
+            for n in (m + 1)..=nmax {
+                let a = (2 * n - 1) as f64 / (n - m) as f64;
+                let b = (n + m - 1) as f64 / (n - m) as f64;
+                let (v1, w1) = (v[idx(n - 1, m)], w[idx(n - 1, m)]);
+                let (v2, w2) = if n >= m + 2 { (v[idx(n - 2, m)], w[idx(n - 2, m)]) } else { (0.0, 0.0) };
+                v[idx(n, m)] = a * z * v1 - b * q * v2;
+                w[idx(n, m)] = a * z * w1 - b * q * w2;
+            }
+        }
+        (v, w)
+    }
+
+    #[test]
+    fn row_recursion_matches_column_recursion_exactly() {
+        let f = GravityField::moon_grail(60).unwrap();
+        for (k, r) in [1.02, 1.1, 1.6, 4.0].iter().zip([
+            Vector3::new(0.3, -0.8, 0.52),
+            Vector3::new(-0.1, 0.05, -0.99),
+            Vector3::new(0.7, 0.7, 0.1),
+            Vector3::new(0.0, 0.0, 1.0),
+        ]) {
+            let r = r.normalize() * (f.radius_km * k);
+            let (v0, w0) = vw_by_columns(&f, &r, 61);
+            let (v1, w1) = f.with_vw(&r, 61, |v, w| (v.to_vec(), w.to_vec()));
+            assert_eq!(v0, v1);
+            assert_eq!(w0, w1);
+            // Повторный вызов (рабочие массивы уже заполнены) даёт то же самое и для меньшей степени.
+            let (v2, _) = f.with_vw(&r, 10, |v, w| (v.to_vec(), w.to_vec()));
+            assert_eq!(&v0[..v2.len()], &v2[..]);
+        }
+    }
 
     #[test]
     fn point_mass_matches_newton() {
@@ -249,7 +356,7 @@ mod tests {
         for k in [2.1, 3.0, 5.0, 10.0, 40.0] {
             let r = Vector3::new(0.6, -0.5, 0.62).normalize() * (f.radius_km * k);
             assert!(f.effective_degree(r.norm()) < 60, "{k}");
-            let (v, w) = f.vw(&r, 61);
+            let (v, w) = f.with_vw(&r, 61, |v, w| (v.to_vec(), w.to_vec()));
             let (mut ax, mut ay, mut az) = (0.0, 0.0, 0.0);
             for n in 0..=60 {
                 for m in 0..=n {

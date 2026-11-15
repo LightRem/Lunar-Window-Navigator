@@ -394,6 +394,8 @@ pub fn summary(reports: &[TransferReport], spacecraft: Option<&str>, rocket: Opt
                     .or(s.landing.map(|l| l.epoch))
                     .map(|t| iso_short(&t)),
                 "delta_v_total_km_s": s.delta_v_total_km_s,
+                "delta_v_mission_km_s": s.delta_v_mission_km_s,
+                "day": r.constraint,
                 "refined": s.refined.is_some(),
             }),
             None => json!({ "spaceport": r.spaceport.id, "feasible": false, "reason": r.no_solution_reason }),
@@ -403,6 +405,9 @@ pub fn summary(reports: &[TransferReport], spacecraft: Option<&str>, rocket: Opt
         return json!({
             "status": "no flight found",
             "trajectory": best.trajectory,
+            "mode": best.mode,
+            "economy": best.economy.as_ref().map(economy_summary),
+        "launch_window": best.launch_window.as_ref().map(launch_window_summary),
             "reason": best.no_solution_reason,
             "spaceports_searched": alternatives,
         });
@@ -421,6 +426,9 @@ pub fn summary(reports: &[TransferReport], spacecraft: Option<&str>, rocket: Opt
     json!({
         "status": if touchdown.is_some() { "flight and landing found" } else { "flight found" },
         "trajectory": s.trajectory,
+        "mode": best.mode,
+        "economy": best.economy.as_ref().map(economy_summary),
+        "launch_window": best.launch_window.as_ref().map(launch_window_summary),
         "values_from": if refined.is_some() { "numerical refinement" } else { "formulas (patched conics)" },
         "not_refined_because": s.refine_failure.as_deref().or(s.refine_skipped.as_deref()),
         "spaceport": format!("{} ({})", best.spaceport.name, best.spaceport.id),
@@ -455,6 +463,7 @@ pub fn summary(reports: &[TransferReport], spacecraft: Option<&str>, rocket: Opt
             "lunar_orbit_insertion_m_s": loi * 1000.0,
             "descent_m_s": descent_m_s,
             "tli_plus_loi_m_s": (tli + loi) * 1000.0,
+            "mission_total_m_s": (tli + loi) * 1000.0 + descent_m_s.unwrap_or(0.0),
             "spacecraft_budget": budget.map(|b| json!({
                 "maneuvers": b.maneuvers,
                 "required_with_reserve_m_s": b.required_with_reserve_m_s,
@@ -467,6 +476,64 @@ pub fn summary(reports: &[TransferReport], spacecraft: Option<&str>, rocket: Opt
         "hohmann": s.hohmann,
         "variants_checked_by_refinement": (!best.refine_attempts.is_empty()).then_some(&best.refine_attempts),
         "spaceports_compared": alternatives,
+    })
+}
+
+/// Окно старта: края, интервалы, наименьший Δv миссии и порог.
+pub fn launch_window_summary(w: &crate::trajectory::LaunchWindow) -> Value {
+    let point = |p: &crate::trajectory::WindowPoint| json!({
+        "launch_utc": iso_short(&p.launch),
+        "lunar_orbit_insertion_utc": iso_short(&p.arrival),
+        "touchdown_utc": p.landing.map(|t| iso_short(&t)),
+        "time_of_flight_h": p.time_of_flight_h,
+        "mission_delta_v_m_s": p.delta_v_mission_km_s * 1000.0,
+    });
+    json!({
+        "values_from": "formulas (patched conics)",
+        "day": w.constraint,
+        "opens_utc": iso_short(&w.opens),
+        "closes_utc": iso_short(&w.closes),
+        "span_h": w.span_h,
+        "open_total_min": w.open_total_min,
+        "margin_m_s": w.margin_m_s,
+        "min_mission_delta_v_m_s": w.min_delta_v_mission_km_s * 1000.0,
+        "limit_mission_delta_v_m_s": w.threshold_delta_v_mission_km_s * 1000.0,
+        "optimum": point(&w.optimum),
+        "segments": w.segments.iter().map(|g| json!({
+            "opens_utc": iso_short(&g.opens),
+            "closes_utc": iso_short(&g.closes),
+            "duration_min": g.duration_min,
+            "best": point(&g.best),
+            "max_mission_delta_v_m_s": g.max_delta_v_mission_km_s * 1000.0,
+            "points": g.points,
+        })).collect::<Vec<_>>(),
+        "arrival_step_min": w.arrival_step_min,
+        "merge_gap_min": w.merge_gap_min,
+        "points_checked": w.points_checked,
+        "points_feasible": w.points_feasible,
+        "points_in_window": w.points_in_window,
+    })
+}
+
+/// Экономный режим: заданные и выбранные сутки, экономия, Δv миссии по суткам.
+fn economy_summary(e: &crate::trajectory::EconomyDays) -> Value {
+    json!({
+        "requested": e.requested,
+        "chosen": e.chosen,
+        "chosen_shift_days": e.chosen_shift_days,
+        "date_shift_days": e.date_shift_days,
+        "min_saving_m_s": e.min_saving_m_s,
+        "requested_mission_delta_v_m_s": e.requested_delta_v_mission_km_s.map(|v| v * 1000.0),
+        "chosen_mission_delta_v_m_s": e.chosen_delta_v_mission_km_s.map(|v| v * 1000.0),
+        "saving_vs_requested_m_s": e.saving_vs_requested_m_s,
+        "days": e.days.iter().map(|d| json!({
+            "shift_days": d.shift_days,
+            "day": d.constraint,
+            "launch_utc": d.launch.map(|t| iso_short(&t)),
+            "time_of_flight_h": d.time_of_flight_h,
+            "mission_delta_v_m_s": d.delta_v_mission_km_s.map(|v| v * 1000.0),
+            "reason": d.reason,
+        })).collect::<Vec<_>>(),
     })
 }
 

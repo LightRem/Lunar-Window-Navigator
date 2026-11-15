@@ -59,6 +59,8 @@ impl LegModel for DirectTransferConfig {
         // Внутренний цикл — в секундах (f64): арифметика дат здесь была дороже задачи Ламберта.
         let launch_to_arrival_s = g.launch_to_arrival_s();
         let (tof_min_s, tof_max_s) = (self.tof_min_days * 86_400.0, self.tof_max_days * 86_400.0);
+        // Соседние шаги — почти одна и та же задача Ламберта: её решение — начало для следующей.
+        let mut z_prev = lambert::START_Z;
         for k in k_min..=k_max {
             let coast_s = step_s * k as f64;
             if coast_s < g.ascent_s + 60.0 {
@@ -72,10 +74,12 @@ impl LegModel for DirectTransferConfig {
             let r1_hat = g.parking_direction(ang);
             let r1 = r1_hat * g.parking_radius_km;
             counters.solves += 1;
-            let Ok(sol) = lambert::solve(&r1, &g.moon_position_km, tof_s, g.mu_earth_km3_s2, &g.plane_normal) else {
+            let Ok((sol, z)) = lambert::solve_from(&r1, &g.moon_position_km, tof_s, g.mu_earth_km3_s2, &g.plane_normal, z_prev)
+            else {
                 counters.failures += 1;
                 continue;
             };
+            z_prev = z;
             out(Leg {
                 coast_s,
                 coast_angle_rad: ang,
